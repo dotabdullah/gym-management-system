@@ -1,0 +1,6 @@
+{
+  "name": "Iron Ledger",
+  "description": "An offline-first gym management application featuring local-first storage and optional Google Sheets database synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
