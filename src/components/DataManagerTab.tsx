@@ -21,6 +21,7 @@ interface DataManagerTabProps {
   attendance: AttendanceRecord[];
   onImportData: (importedMembers: Member[], importedPayments: Payment[]) => void;
   onClearDatabase: (clearMembers: boolean, clearPayments: boolean, clearAttendance: boolean) => void;
+  onRestoreBackup?: (data: { members: Member[]; payments: Payment[]; plans: Plan[]; attendance: AttendanceRecord[] }) => void;
   backupStatus?: {
     folderName: string | null;
     lastBackupAt: string | null;
@@ -38,6 +39,7 @@ export default function DataManagerTab({
   attendance,
   onImportData,
   onClearDatabase,
+  onRestoreBackup,
   backupStatus = { folderName: null, lastBackupAt: null, error: null, isConfigured: false },
   onSelectBackupDirectory,
   onDisconnectBackupDirectory
@@ -51,6 +53,71 @@ export default function DataManagerTab({
     errors: string[];
     logs: string[];
   } | null>(null);
+
+  // Restore states
+  const [restoreSummary, setRestoreSummary] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleJsonFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const data = JSON.parse(text);
+
+        // Basic verification that the uploaded JSON has our backup structure
+        const hasMembers = Array.isArray(data.members);
+        const hasPayments = Array.isArray(data.payments);
+        
+        if (!hasMembers && !hasPayments) {
+          throw new Error("Invalid backup file format. The JSON file must contain 'members' or 'payments' arrays.");
+        }
+
+        const memberCount = data.members?.length || 0;
+        const paymentCount = data.payments?.length || 0;
+        const attendanceCount = data.attendance?.length || 0;
+        const planCount = data.plans?.length || 0;
+
+        const confirmRestore = window.confirm(
+          `Are you sure you want to restore this backup?\n\nThis will load:\n- ${memberCount} Athletes\n- ${paymentCount} Payments\n- ${attendanceCount} Attendance Logs\n- ${planCount} Rate Tiers\n\nWarning: Your current active database will be completely replaced!`
+        );
+
+        if (!confirmRestore) {
+          setRestoreSummary({
+            success: false,
+            message: "Restore canceled by user."
+          });
+          return;
+        }
+
+        if (onRestoreBackup) {
+          onRestoreBackup({
+            members: data.members || [],
+            payments: data.payments || [],
+            plans: data.plans || [],
+            attendance: data.attendance || []
+          });
+          setRestoreSummary({
+            success: true,
+            message: `Successfully restored ${memberCount} athletes, ${paymentCount} payments, ${attendanceCount} logs, and ${planCount} rate tiers.`
+          });
+        }
+      } catch (err: any) {
+        console.error("JSON restore failed:", err);
+        setRestoreSummary({
+          success: false,
+          message: err.message || "Failed to parse backup JSON file. Ensure it is a valid backup file."
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
   
   // Wipe states
   const [showWipeModal, setShowWipeModal] = useState(false);
@@ -477,6 +544,58 @@ export default function DataManagerTab({
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+
+          {/* Restore Database from JSON Backup */}
+          <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-6 space-y-4" id="restore-backup-box">
+            <div className="flex items-center gap-2 border-b border-slate-850 pb-3">
+              <Database className="w-4 h-4 text-emerald-400" />
+              <h3 className="text-white font-bold text-sm uppercase tracking-wider font-sans">Restore Database from JSON Backup</h3>
+            </div>
+
+            <p className="text-slate-400 text-xs leading-relaxed">
+              If you have an offline `.json` backup file (such as the files automatically saved to your PC backup folder or exported), you can upload it here to restore your entire database. 
+              <span className="text-amber-400 font-semibold"> Warning: This will completely replace your current athletes, payments, plans, and attendance data.</span>
+            </p>
+
+            {/* JSON File Upload */}
+            <div
+              onClick={() => jsonFileInputRef.current?.click()}
+              className="border-2 border-dashed border-slate-800 hover:border-emerald-400/50 bg-[#0A0C10]/40 hover:bg-[#0A0C10]/80 rounded-2xl p-6 text-center cursor-pointer transition-all duration-200"
+              id="json-drop-zone"
+            >
+              <input 
+                type="file" 
+                ref={jsonFileInputRef}
+                onChange={handleJsonFileChange}
+                accept=".json"
+                className="hidden"
+                id="json-file-input"
+              />
+              <Upload className="w-10 h-10 text-emerald-500/80 mx-auto mb-2" />
+              <p className="text-sm font-semibold text-white">Click to select or drag your `.json` backup file here</p>
+              <p className="text-xs text-slate-500 mt-1">Accepts only valid `.json` backup files</p>
+            </div>
+
+            {restoreSummary && (
+              <div className={`border rounded-2xl p-4 space-y-2 ${restoreSummary.success ? 'border-emerald-500/20 bg-emerald-950/10' : 'border-red-500/20 bg-red-950/10'}`} id="restore-summary-box">
+                <div className="flex items-center gap-2">
+                  {restoreSummary.success ? (
+                    <Check className="w-5 h-5 text-emerald-400 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+                  )}
+                  <div>
+                    <h4 className="text-white font-bold text-xs uppercase">
+                      {restoreSummary.success ? 'Database Restored Successfully!' : 'Restore Failed'}
+                    </h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {restoreSummary.message}
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
           </div>

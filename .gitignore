@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Tauri build artifacts
+src-tauri/target/
+src-tauri/binaries/
+.tauri/
+

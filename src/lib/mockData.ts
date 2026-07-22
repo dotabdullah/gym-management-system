@@ -276,7 +276,8 @@ export const DEFAULT_LICENSES: License[] = [
 
 // Helper to check license activation status
 export function validateLicenseKey(key: string): boolean {
-  // We simulate that any key following GYM-ACTV-XXXX-XXXX is valid
-  const regex = /^GYM-ACTV-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
-  return regex.test(key);
+  // Accepts standard GYM-ACTV-XXXX-XXXX keys or GYM-1YR-HWSUFFIX-XXXX-XXXX keys
+  const standardRegex = /^GYM-ACTV-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+  const hwLockedRegex = /^GYM-1YR-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+  return standardRegex.test(key) || hwLockedRegex.test(key);
 }

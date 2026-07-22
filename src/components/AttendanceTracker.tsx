@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Member, AttendanceRecord, Plan } from '../types';
+import { exportAttendanceToCSV } from '../lib/csvHelper';
 import { 
   Scan, 
   Search, 
@@ -9,7 +10,11 @@ import {
   ShieldAlert, 
   History, 
   BarChart, 
-  Users 
+  Users,
+  Download,
+  CheckCircle2,
+  Activity,
+  Award
 } from 'lucide-react';
 
 interface AttendanceTrackerProps {
@@ -29,7 +34,46 @@ export default function AttendanceTracker({
   const [scannedMember, setScannedMember] = useState<Member | null>(null);
   const [scanStatus, setScanStatus] = useState<'granted' | 'expired' | 'idle'>('idle');
 
-  // Filter members list based on quick search
+  // Date Range Filters for Attendance Logs
+  const [dateFilterMode, setDateFilterMode] = useState<'all' | 'this_month' | 'select_month' | 'custom_range'>('this_month');
+  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().substring(0, 7)); // YYYY-MM
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [memberSearchTerm, setMemberSearchTerm] = useState('');
+
+  // Date Filtering Logic
+  const dateFilteredAttendance = attendance.filter(a => {
+    if (dateFilterMode === 'all') return true;
+    
+    if (dateFilterMode === 'this_month') {
+      const currentMonth = new Date().toISOString().substring(0, 7);
+      return a.date.substring(0, 7) === currentMonth;
+    }
+
+    if (dateFilterMode === 'select_month') {
+      return a.date.substring(0, 7) === selectedMonth;
+    }
+
+    if (dateFilterMode === 'custom_range') {
+      if (!startDate && !endDate) return true;
+      if (startDate && !endDate) return a.date >= startDate;
+      if (!startDate && endDate) return a.date <= endDate;
+      return a.date >= startDate && a.date <= endDate;
+    }
+
+    return true;
+  });
+
+  // Export Attendance CSV
+  const handleExportCSV = () => {
+    exportAttendanceToCSV(dateFilteredAttendance, members, `attendance_logs_${dateFilterMode}`);
+  };
+
+  // Filter members list based on quick search in scanner
   const searchResults = searchQuery.trim() === '' 
     ? [] 
     : members.filter(m => 
@@ -48,15 +92,247 @@ export default function AttendanceTracker({
     setSearchQuery('');
   };
 
-  // Recent attendance records sorted by time
-  const sortedAttendance = [...attendance].sort((a, b) => {
+  // Sorted attendance records
+  const sortedAttendance = [...dateFilteredAttendance].sort((a, b) => {
     const dateCompare = b.date.localeCompare(a.date);
     if (dateCompare !== 0) return dateCompare;
     return b.checkInTime.localeCompare(a.checkInTime);
-  }).slice(0, 10);
+  });
+
+  // Calculate athlete check-in metrics for the selected period
+  const athleteCheckInCounts = members.map(m => {
+    const memberLogs = attendance.filter(a => a.memberId === m.id);
+    const periodLogs = dateFilteredAttendance.filter(a => a.memberId === m.id);
+    const plan = plans.find(p => p.id === m.planId);
+    
+    // Sort logs to find latest check-in
+    const sortedLogs = [...memberLogs].sort((a, b) => {
+      const dComp = b.date.localeCompare(a.date);
+      if (dComp !== 0) return dComp;
+      return b.checkInTime.localeCompare(a.checkInTime);
+    });
+
+    const lastLog = sortedLogs[0];
+
+    return {
+      member: m,
+      planName: plan?.name || 'Basic',
+      periodCheckIns: periodLogs.length,
+      allTimeCheckIns: memberLogs.length,
+      lastCheckInDate: lastLog ? lastLog.date : 'Never',
+      lastCheckInTime: lastLog ? lastLog.checkInTime : ''
+    };
+  }).filter(item => {
+    if (!memberSearchTerm.trim()) return true;
+    return item.member.name.toLowerCase().includes(memberSearchTerm.toLowerCase()) ||
+           item.member.phone.includes(memberSearchTerm);
+  }).sort((a, b) => b.periodCheckIns - a.periodCheckIns);
+
+  // Summary Metrics
+  const totalPeriodCheckIns = dateFilteredAttendance.length;
+  const uniqueActiveAthletes = new Set(dateFilteredAttendance.map(a => a.memberId)).size;
+  const topAthlete = athleteCheckInCounts[0]?.periodCheckIns > 0 ? athleteCheckInCounts[0] : null;
 
   return (
     <div className="space-y-6" id="attendance-tracker-container">
+      {/* Date Filter Bar & Export CSV */}
+      <div className="bg-[#161B22] border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 shadow-sm" id="attendance-date-filter-bar">
+        <div className="flex items-center gap-2">
+          <Calendar className="w-5 h-5 text-purple-400 shrink-0" />
+          <div>
+            <h4 className="text-white font-bold text-sm">Attendance Logs & Monthly Check-In Filter</h4>
+            <p className="text-slate-400 text-xs">Track athlete floor entries and check-in volume per month or custom range</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5" id="attendance-filter-controls">
+          <select
+            value={dateFilterMode}
+            onChange={(e) => setDateFilterMode(e.target.value as any)}
+            className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none cursor-pointer"
+            id="attendance-mode-select"
+          >
+            <option value="this_month">This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
+            <option value="all">All Time Records ({attendance.length})</option>
+            <option value="select_month">Select Month...</option>
+            <option value="custom_range">Custom Date Range...</option>
+          </select>
+
+          {dateFilterMode === 'select_month' && (
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none font-mono"
+              id="attendance-month-picker"
+            />
+          )}
+
+          {dateFilterMode === 'custom_range' && (
+            <div className="flex items-center gap-1.5" id="attendance-custom-range-inputs">
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none font-mono"
+                id="attendance-range-start-date"
+              />
+              <span className="text-slate-500 text-xs">to</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none font-mono"
+                id="attendance-range-end-date"
+              />
+            </div>
+          )}
+
+          <button
+            onClick={handleExportCSV}
+            className="bg-lime-400 hover:bg-lime-500 text-black px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-lime-400/5 ml-auto md:ml-0"
+            id="export-attendance-csv-btn"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export Attendance CSV
+          </button>
+        </div>
+      </div>
+
+      {/* Summary Bento Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-5" id="attendance-summary-cards">
+        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-purple-500/10 border border-purple-500/20 text-purple-400 flex items-center justify-center shrink-0">
+            <Activity className="w-6 h-6" />
+          </div>
+          <div>
+            <span className="text-slate-500 text-xs font-medium uppercase tracking-wider block">Period Total Check-Ins</span>
+            <h3 className="text-2xl font-bold text-white font-display mt-0.5">{totalPeriodCheckIns} Entries</h3>
+            <span className="text-slate-400 text-[11px]">Recorded in selected date range</span>
+          </div>
+        </div>
+
+        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-lime-400/10 border border-lime-400/20 text-lime-400 flex items-center justify-center shrink-0">
+            <Users className="w-6 h-6" />
+          </div>
+          <div>
+            <span className="text-slate-500 text-xs font-medium uppercase tracking-wider block">Unique Visited Athletes</span>
+            <h3 className="text-2xl font-bold text-white font-display mt-0.5">{uniqueActiveAthletes} Members</h3>
+            <span className="text-slate-400 text-[11px]">Active floor visitors in this period</span>
+          </div>
+        </div>
+
+        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+            <Award className="w-6 h-6" />
+          </div>
+          <div>
+            <span className="text-slate-500 text-xs font-medium uppercase tracking-wider block">Top Frequent Athlete</span>
+            <h3 className="text-base font-bold text-white font-display truncate mt-0.5">
+              {topAthlete ? topAthlete.member.name : 'No Entries Yet'}
+            </h3>
+            <span className="text-lime-400 text-[11px] font-semibold">
+              {topAthlete ? `${topAthlete.periodCheckIns} check-ins in selected period` : 'Check-ins will appear here'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Athlete Total Check-In Breakdown Table */}
+      <div className="bg-[#161B22] border border-slate-800 rounded-3xl overflow-hidden shadow-sm" id="athlete-attendance-breakdown">
+        <div className="p-5 border-b border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4" id="breakdown-header">
+          <div className="flex items-center gap-2">
+            <Users className="w-5 h-5 text-lime-400" />
+            <div>
+              <h3 className="text-white font-semibold font-display text-base">Athlete Check-In Record & Package Usage</h3>
+              <p className="text-slate-400 text-xs">Optional daily tracking: Monitor total check-ins per athlete for the selected period</p>
+            </div>
+          </div>
+
+          <div className="relative w-full md:w-64" id="breakdown-search">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 w-3.5 h-3.5" />
+            <input
+              type="text"
+              placeholder="Search athlete name..."
+              value={memberSearchTerm}
+              onChange={(e) => setMemberSearchTerm(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl pl-9 pr-3 py-1.5 text-xs text-white focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs border-collapse" id="attendance-summary-table">
+            <thead>
+              <tr className="bg-slate-900/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
+                <th className="p-3.5 pl-5">Athlete Name</th>
+                <th className="p-3.5">Assigned Package</th>
+                <th className="p-3.5 text-center">Period Check-Ins</th>
+                <th className="p-3.5 text-center">All-Time Check-Ins</th>
+                <th className="p-3.5">Last Checked In</th>
+                <th className="p-3.5 text-right pr-5">Quick Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/80 text-slate-300">
+              {athleteCheckInCounts.map(({ member, planName, periodCheckIns, allTimeCheckIns, lastCheckInDate, lastCheckInTime }) => (
+                <tr key={member.id} className="hover:bg-slate-800/30 transition-colors" id={`athlete-row-${member.id}`}>
+                  <td className="p-3.5 pl-5 font-medium text-white flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-full bg-slate-800 text-lime-400 font-bold text-xs flex items-center justify-center border border-slate-700">
+                      {member.name.split(' ').map(n => n[0]).join('')}
+                    </div>
+                    <div>
+                      <span className="block font-semibold">{member.name}</span>
+                      <span className="block text-[10px] text-slate-500 font-mono">{member.phone}</span>
+                    </div>
+                  </td>
+                  <td className="p-3.5">
+                    <span className="inline-block px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 font-medium text-[11px]">
+                      {planName}
+                    </span>
+                  </td>
+                  <td className="p-3.5 text-center">
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-lime-400/10 border border-lime-400/30 text-lime-400 font-bold text-xs">
+                      {periodCheckIns} visits
+                    </span>
+                  </td>
+                  <td className="p-3.5 text-center font-mono font-medium text-slate-400">
+                    {allTimeCheckIns} total
+                  </td>
+                  <td className="p-3.5 text-slate-400">
+                    {lastCheckInDate !== 'Never' ? (
+                      <div>
+                        <span className="block text-white text-[11px] font-medium">{lastCheckInDate}</span>
+                        <span className="block text-[10px] text-slate-500 font-mono">{lastCheckInTime}</span>
+                      </div>
+                    ) : (
+                      <span className="text-slate-600 text-[11px] italic">No logs yet</span>
+                    )}
+                  </td>
+                  <td className="p-3.5 text-right pr-5">
+                    <button
+                      onClick={() => handleSimulateScan(member)}
+                      className="bg-slate-800 hover:bg-slate-700 text-lime-400 px-3 py-1 rounded-lg text-[11px] font-bold border border-slate-700 transition-all cursor-pointer inline-flex items-center gap-1"
+                      id={`checkin-btn-${member.id}`}
+                    >
+                      <CheckCircle2 className="w-3 h-3 text-lime-400" />
+                      Check In Now
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {athleteCheckInCounts.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="p-8 text-center text-slate-500 italic">
+                    No athletes found matching your search.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* Upper scanning dashboard */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" id="attendance-upper-grid">
         

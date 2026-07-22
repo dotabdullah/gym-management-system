@@ -1,18 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Member, Payment, Plan, AttendanceRecord, License, SyncStatus } from './types';
-import { 
-  initAuth, 
-  googleSignIn, 
-  logout, 
-  getAccessToken 
-} from './lib/firebase';
-import { 
-  findSpreadsheet, 
-  createSpreadsheet, 
-  readSpreadsheetData, 
-  writeSpreadsheetData, 
-  mergeData 
-} from './lib/sheets';
+import { Member, Payment, Plan, AttendanceRecord, License } from './types';
 import {
   saveDirectoryHandle,
   loadDirectoryHandle,
@@ -27,7 +14,6 @@ import {
   DEFAULT_ATTENDANCE, 
   validateLicenseKey 
 } from './lib/mockData';
-import { User } from 'firebase/auth';
 
 // Icons
 import { 
@@ -46,7 +32,8 @@ import {
   Menu,
   X,
   Lock,
-  Database
+  Database,
+  Key
 } from 'lucide-react';
 
 // Components
@@ -79,19 +66,7 @@ export default function App() {
   // Client workstation variables
   const [hardwareId, setHardwareId] = useState<string>('');
 
-  // OAuth & Sync State
-  const [user, setUser] = useState<User | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
-    lastSyncedAt: null,
-    isSyncing: false,
-    spreadsheetId: null,
-    spreadsheetUrl: null,
-    error: null
-  });
-
   // Local Folder Auto-Backup State
-  const [authDomainError, setAuthDomainError] = useState<boolean>(false);
   const [backupDirectory, setBackupDirectory] = useState<FileSystemDirectoryHandle | null>(null);
   const [backupStatus, setBackupStatus] = useState<{
     folderName: string | null;
@@ -183,28 +158,6 @@ export default function App() {
       setLicense(trialLicense);
       localStorage.setItem('gym_license', JSON.stringify(trialLicense));
     }
-
-    // Initialize Firebase Auth
-    initAuth(
-      (currentUser, token) => {
-        setUser(currentUser);
-        setAccessToken(token);
-        // Load sync status
-        const savedSpreadsheetId = localStorage.getItem('google_spreadsheet_id');
-        const savedUrl = localStorage.getItem('google_spreadsheet_url');
-        const savedLastSync = localStorage.getItem('google_last_sync');
-        setSyncStatus(prev => ({
-          ...prev,
-          spreadsheetId: savedSpreadsheetId,
-          spreadsheetUrl: savedUrl,
-          lastSyncedAt: savedLastSync
-        }));
-      },
-      () => {
-        setUser(null);
-        setAccessToken(null);
-      }
-    );
   }, []);
 
   // Save changes helper
@@ -220,118 +173,8 @@ export default function App() {
     localStorage.setItem('gym_attendance', JSON.stringify(updatedAttendance));
   };
 
-  // 2. Synchronization engine
-  const handleSyncWithSheets = async (tokenOverride?: string) => {
-    const token = tokenOverride || accessToken;
-    if (!token) {
-      alert("Please link your Google account to sync databases.");
-      return;
-    }
-
-    setSyncStatus(prev => ({ ...prev, isSyncing: true, error: null }));
-
-    try {
-      let spreadsheetId = syncStatus.spreadsheetId;
-      let spreadsheetUrl = syncStatus.spreadsheetUrl;
-
-      // 1. Find or create the Google Spreadsheet database file in Google Drive
-      if (!spreadsheetId) {
-        spreadsheetId = await findSpreadsheet(token);
-        if (!spreadsheetId) {
-          const newSheet = await createSpreadsheet(token);
-          spreadsheetId = newSheet.id;
-          spreadsheetUrl = newSheet.url;
-        } else {
-          spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
-        }
-
-        localStorage.setItem('google_spreadsheet_id', spreadsheetId);
-        localStorage.setItem('google_spreadsheet_url', spreadsheetUrl);
-        setSyncStatus(prev => ({ ...prev, spreadsheetId, spreadsheetUrl }));
-      }
-
-      // 2. Fetch remote spreadsheet records
-      const remoteData = await readSpreadsheetData(token, spreadsheetId);
-
-      // 3. Merge Local & Remote datasets using updatedAt timestamps
-      const localData = { members, payments, plans, attendance, licenses: [] };
-      const merged = mergeData(localData, remoteData);
-
-      // 4. Overwrite/Write back synchronized unified state
-      await writeSpreadsheetData(token, spreadsheetId, {
-        members: merged.members,
-        payments: merged.payments,
-        plans: merged.plans,
-        attendance: merged.attendance,
-        licenses: merged.licenses
-      });
-
-      // 5. Update Local React State and LocalStorage
-      setMembers(merged.members);
-      setPayments(merged.payments);
-      setPlans(merged.plans);
-      setAttendance(merged.attendance);
-      saveStateToLocalStorage(merged.members, merged.payments, merged.plans, merged.attendance);
-
-      // Save sync marker
-      const nowStr = new Date().toLocaleString();
-      localStorage.setItem('google_last_sync', nowStr);
-      setSyncStatus(prev => ({
-        ...prev,
-        isSyncing: false,
-        lastSyncedAt: nowStr,
-        error: null
-      }));
-
-    } catch (err: any) {
-      console.error('Sync failure:', err);
-      setSyncStatus(prev => ({
-        ...prev,
-        isSyncing: false,
-        error: err.message || 'Synchronization failed'
-      }));
-    }
-  };
-
-  // Google Login linkage handler
-  const handleConnectGoogle = async () => {
-    try {
-      setAuthDomainError(false);
-      const result = await googleSignIn();
-      if (result) {
-        setUser(result.user);
-        setAccessToken(result.accessToken);
-        // Start initial auto-sync
-        await handleSyncWithSheets(result.accessToken);
-      }
-    } catch (err: any) {
-      console.error('Google authorization failed:', err);
-      // Catch unauthorized-domain error specifically
-      if (err?.code === 'auth/unauthorized-domain' || (err?.message && err.message.includes('unauthorized-domain'))) {
-        setAuthDomainError(true);
-      } else {
-        alert(`Google sign-in error: ${err.message || err}`);
-      }
-    }
-  };
-
-  const handleDisconnectGoogle = async () => {
-    if (window.confirm("Disconnect Google Account? Local database will remain active offline.")) {
-      await logout();
-      setUser(null);
-      setAccessToken(null);
-      setSyncStatus({
-        lastSyncedAt: null,
-        isSyncing: false,
-        spreadsheetId: null,
-        spreadsheetUrl: null,
-        error: null
-      });
-      localStorage.removeItem('google_spreadsheet_id');
-      localStorage.removeItem('google_spreadsheet_url');
-      localStorage.removeItem('google_last_sync');
-    }
-  };
+  // 2. Synchronization Engine
+  // Deprecated Google Sheets synchronization - Running 100% offline-first.
 
   // Automated Local Folder Backup Handlers
   const handleSelectBackupDirectory = async () => {
@@ -388,7 +231,7 @@ export default function App() {
     }
   };
 
-  // 3. Local Mutation Handlers (Auto-sync to Cloud is triggered if connected!)
+  // 3. Local Mutation Handlers (Auto-sync to PC Backup Folder is triggered if configured!)
   const triggerAutoSyncIfOnline = (
     nextMembers: Member[],
     nextPayments: Payment[],
@@ -424,14 +267,43 @@ export default function App() {
         }));
       });
     }
+  };
 
-    if (user && accessToken) {
-      handleSyncWithSheets();
+  // 7-Day Free Trial & Read-Only State Management
+  const [trialStartDate] = useState<string>(() => {
+    let stored = localStorage.getItem('gym_trial_start_date');
+    if (!stored) {
+      stored = new Date().toISOString();
+      localStorage.setItem('gym_trial_start_date', stored);
     }
+    return stored;
+  });
+
+  const [showReadOnlyModal, setShowReadOnlyModal] = useState(false);
+
+  // Trial & License calculations
+  const diffMs = Date.now() - new Date(trialStartDate).getTime();
+  const trialDaysElapsed = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const trialDaysRemaining = Math.max(0, 7 - trialDaysElapsed);
+  const isTrialExpired = trialDaysElapsed >= 7;
+
+  const isLicenseActive = license.status === 'activated' && 
+    Boolean(license.expiresAt) && 
+    new Date(license.expiresAt) > new Date();
+
+  const isReadOnly = !isLicenseActive && isTrialExpired;
+
+  // Interceptor for write permission
+  const checkWritePermission = (): boolean => {
+    if (isLicenseActive) return true;
+    if (!isTrialExpired) return true; // Within 7-day trial
+    setShowReadOnlyModal(true);
+    return false;
   };
 
   // Member CRUD
   const handleAddMember = (m: Omit<Member, 'id' | 'updatedAt'>) => {
+    if (!checkWritePermission()) return;
     const newMember: Member = {
       ...m,
       id: `mem-${Date.now()}`,
@@ -443,12 +315,14 @@ export default function App() {
   };
 
   const handleUpdateMember = (m: Member) => {
+    if (!checkWritePermission()) return;
     const updated = members.map(item => item.id === m.id ? m : item);
     setMembers(updated);
     triggerAutoSyncIfOnline(updated, payments, plans, attendance);
   };
 
   const handleDeleteMember = (id: string) => {
+    if (!checkWritePermission()) return;
     const updatedMembers = members.filter(item => item.id !== id);
     const updatedAttendance = attendance.filter(item => item.memberId !== id);
     setMembers(updatedMembers);
@@ -458,6 +332,7 @@ export default function App() {
 
   // Payments Ledger Mutator
   const handleRecordPayment = (p: Omit<Payment, 'id' | 'updatedAt'>) => {
+    if (!checkWritePermission()) return;
     const newPayment: Payment = {
       ...p,
       id: `pay-${Date.now()}`,
@@ -480,6 +355,7 @@ export default function App() {
 
   // Desk Check-In Attendance Tracker
   const handleCheckIn = (memberId: string) => {
+    if (!checkWritePermission()) return;
     const newRecord: AttendanceRecord = {
       id: `att-${Date.now()}`,
       memberId,
@@ -493,6 +369,7 @@ export default function App() {
 
   // Pricing Plans Mutators
   const handleAddPlan = (p: Omit<Plan, 'id' | 'updatedAt'>) => {
+    if (!checkWritePermission()) return;
     const newPlan: Plan = {
       ...p,
       id: `plan-${Date.now()}`,
@@ -504,12 +381,14 @@ export default function App() {
   };
 
   const handleUpdatePlan = (p: Plan) => {
+    if (!checkWritePermission()) return;
     const updated = plans.map(item => item.id === p.id ? p : item);
     setPlans(updated);
     triggerAutoSyncIfOnline(members, payments, updated, attendance);
   };
 
   const handleDeletePlan = (id: string) => {
+    if (!checkWritePermission()) return;
     const updated = plans.filter(item => item.id !== id);
     setPlans(updated);
     triggerAutoSyncIfOnline(members, payments, updated, attendance);
@@ -517,6 +396,7 @@ export default function App() {
 
   // Bulk Data Manager Handlers
   const handleImportData = (importedMembers: Member[], importedPayments: Payment[]) => {
+    if (!checkWritePermission()) return;
     const updatedMembers = [...importedMembers, ...members];
     const updatedPayments = [...importedPayments, ...payments];
     setMembers(updatedMembers);
@@ -525,6 +405,7 @@ export default function App() {
   };
 
   const handleClearDatabase = (clearMembers: boolean, clearPayments: boolean, clearAttendance: boolean) => {
+    if (!checkWritePermission()) return;
     const updatedMembers = clearMembers ? [] : members;
     const updatedPayments = clearPayments ? [] : payments;
     const updatedAttendance = clearAttendance ? [] : attendance;
@@ -536,12 +417,46 @@ export default function App() {
     triggerAutoSyncIfOnline(updatedMembers, updatedPayments, plans, updatedAttendance);
   };
 
+  const handleRestoreBackup = (data: {
+    members: Member[];
+    payments: Payment[];
+    plans: Plan[];
+    attendance: AttendanceRecord[];
+  }) => {
+    const nextMembers = data.members || [];
+    const nextPayments = data.payments || [];
+    const nextPlans = data.plans && data.plans.length > 0 ? data.plans : DEFAULT_PLANS;
+    const nextAttendance = data.attendance || [];
+
+    setMembers(nextMembers);
+    setPayments(nextPayments);
+    setPlans(nextPlans);
+    setAttendance(nextAttendance);
+
+    triggerAutoSyncIfOnline(nextMembers, nextPayments, nextPlans, nextAttendance);
+  };
+
   // 4. Station License Bind Handlers
   const handleActivateLicense = (key: string, ownerName: string): boolean => {
-    const isValid = validateLicenseKey(key);
+    const cleanKey = key.trim().toUpperCase();
+    const localHwSuffix = (hardwareId || 'HW-1000').replace(/[^A-Z0-9]/gi, '').slice(-4).toUpperCase();
+
+    // Hardware ID check for bound keys (GYM-1YR-[HW_SUFFIX]-[P1]-[P2])
+    if (cleanKey.startsWith('GYM-1YR-')) {
+      const parts = cleanKey.split('-');
+      if (parts.length === 5) {
+        const keyHwSuffix = parts[2];
+        if (keyHwSuffix !== localHwSuffix) {
+          alert(`Activation Failed: Hardware ID Mismatch!\n\nThis license key was generated specifically for a PC with Hardware ID ending in "${keyHwSuffix}".\n\nThis machine's Hardware ID ends in "${localHwSuffix}".\n\nPlease request a key generated for this PC's Hardware ID (${hardwareId}).`);
+          return false;
+        }
+      }
+    }
+
+    const isValid = validateLicenseKey(cleanKey);
     if (isValid) {
       const activeLicense: License = {
-        key,
+        key: cleanKey,
         status: 'activated',
         activatedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
@@ -596,59 +511,28 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0A0C10] text-slate-200 flex flex-col font-sans selection:bg-lime-400 selection:text-black" id="main-app-shell">
       
-      {/* 1. Trial Top Warning Banner */}
-      {license.status === 'trial' && !isExpiredTrial && (
-        <div className="bg-gradient-to-r from-amber-600 to-amber-500 text-center py-2 px-4 text-xs font-semibold flex items-center justify-center gap-2 relative z-30" id="trial-banner">
-          <span>⚠️ Running on 14-day Free Workstation Trial. Activate subscription key to bind this device permanently.</span>
+      {/* 1. Trial / License Status Top Banner */}
+      {!isLicenseActive && !isTrialExpired && (
+        <div className="bg-gradient-to-r from-amber-600 to-amber-500 text-center py-2 px-4 text-xs font-semibold flex items-center justify-center gap-2 relative z-30 shadow-sm" id="trial-banner">
+          <span>⚡ <strong>7-Day Free Trial Active:</strong> Day {Math.min(7, trialDaysElapsed + 1)} of 7 ({trialDaysRemaining} Day(s) Left). All features unlocked!</span>
           <button 
             onClick={() => setActiveTab('licensing')}
-            className="bg-black/35 hover:bg-black/50 text-white px-2.5 py-0.5 rounded-lg transition-all border border-white/10"
+            className="bg-black/35 hover:bg-black/50 text-white px-2.5 py-0.5 rounded-lg transition-all border border-white/10 font-bold cursor-pointer ml-1"
           >
-            Activate Station
+            Activate 1-Year License
           </button>
         </div>
       )}
 
-      {/* 2. Device Locked Full Screen Barrier Simulation */}
-      {isExpiredTrial && (
-        <div className="fixed inset-0 bg-[#0A0C10]/95 backdrop-blur-md z-50 flex items-center justify-center p-4" id="locked-node-screen">
-          <div className="bg-[#161B22] border border-slate-800 rounded-3xl max-w-md w-full p-6 text-center space-y-5" id="locked-node-card">
-            <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 flex items-center justify-center mx-auto shadow-lg">
-              <Lock className="w-8 h-8" />
-            </div>
-            <div className="space-y-2">
-              <h3 className="text-xl font-bold font-display text-white">Workstation Activation Required</h3>
-              <p className="text-slate-400 text-xs leading-relaxed">
-                Your 14-day local trial on device <code className="text-yellow-400 font-mono">{hardwareId}</code> has expired. Please insert an authorized key to unlock the database registry.
-              </p>
-            </div>
-            
-            {/* Embedded key form inside blocker */}
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-left">
-              <span className="block text-[10px] uppercase font-bold text-slate-500 mb-1.5">Simulation Bypass</span>
-              <p className="text-[11px] text-slate-400 leading-normal mb-3">
-                Since this is a creator demonstration, navigate to the **Licenses** panel, click **Show Admin Panel** to generate a key, and insert it here to unlock!
-              </p>
-              <button 
-                onClick={() => {
-                  // Bypass expired trial for simulation testing
-                  const fakeActive: License = {
-                    key: 'GYM-ACTV-ABCD-1234',
-                    status: 'activated',
-                    activatedAt: new Date().toISOString(),
-                    expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-                    hwId: hardwareId,
-                    ownerName: 'Demo Center'
-                  };
-                  setLicense(fakeActive);
-                  localStorage.setItem('gym_license', JSON.stringify(fakeActive));
-                }}
-                className="w-full bg-slate-800 hover:bg-slate-700 text-white py-1.5 rounded-lg text-xs font-bold border border-slate-700"
-              >
-                Bypass Lock (Demo Key Autoload)
-              </button>
-            </div>
-          </div>
+      {!isLicenseActive && isTrialExpired && (
+        <div className="bg-gradient-to-r from-red-600 to-amber-600 text-center py-2 px-4 text-xs font-semibold flex items-center justify-center gap-2 relative z-30 shadow-sm" id="readonly-banner">
+          <span>🔒 <strong>7-Day Trial Completed (Read-Only Mode):</strong> You can browse and export records, but editing/creating is locked.</span>
+          <button 
+            onClick={() => setActiveTab('licensing')}
+            className="bg-black/40 hover:bg-black/60 text-white px-3 py-0.5 rounded-lg transition-all border border-white/20 font-bold cursor-pointer ml-1"
+          >
+            Activate 1-Year License
+          </button>
         </div>
       )}
 
@@ -771,45 +655,41 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Header Cloud Sync Widget */}
-            <div className="flex items-center gap-3" id="header-sync-widget">
-              {user ? (
-                <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5" id="sync-widget-active">
-                  <Cloud className="w-4 h-4 text-lime-400 shrink-0" />
-                  <div className="hidden lg:block text-left">
-                    <span className="block text-[10px] text-slate-400 font-semibold truncate max-w-[120px]">{user.email}</span>
-                    <span className="block text-[8px] text-slate-500 mt-0.5">
-                      {syncStatus.lastSyncedAt ? `Synced ${syncStatus.lastSyncedAt.split(', ')[1]}` : 'Unsynced'}
+            {/* Right Header PC Backup Status Widget */}
+            <div className="flex items-center gap-3" id="header-backup-widget">
+              {backupStatus.isConfigured ? (
+                <button
+                  onClick={() => setActiveTab('data-manager')}
+                  className="flex items-center gap-2 bg-[#161B22] hover:bg-slate-800 border border-emerald-500/20 hover:border-emerald-500/40 rounded-xl px-3.5 py-1.5 text-left transition-all cursor-pointer shadow-sm"
+                  id="header-backup-status-active"
+                  title="Configure or manage PC backups"
+                >
+                  <Database className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <div className="text-left leading-tight">
+                    <span className="block text-[10px] text-white font-bold truncate max-w-[120px]">
+                      PC Backup Active
+                    </span>
+                    <span className="block text-[8px] text-emerald-400 mt-0.5">
+                      📁 {backupStatus.folderName}
                     </span>
                   </div>
-                  
-                  <button
-                    onClick={() => handleSyncWithSheets()}
-                    disabled={syncStatus.isSyncing}
-                    title="Manual Google Sheet Sync"
-                    className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer"
-                    id="trigger-sync-btn"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${syncStatus.isSyncing ? 'animate-spin' : ''}`} />
-                  </button>
-
-                  <button
-                    onClick={handleDisconnectGoogle}
-                    title="Sign Out Google Sheets"
-                    className="p-1 rounded bg-slate-800 hover:bg-red-950 hover:text-red-400 text-slate-400 transition-all cursor-pointer"
-                    id="disconnect-g-btn"
-                  >
-                    <LogOut className="w-3 h-3" />
-                  </button>
-                </div>
+                </button>
               ) : (
                 <button
-                  onClick={handleConnectGoogle}
-                  className="bg-slate-900 hover:bg-slate-800 text-white border border-slate-800 px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 hover:border-lime-400/40 transition-all cursor-pointer shadow-sm"
-                  id="link-google-btn"
+                  onClick={() => setActiveTab('data-manager')}
+                  className="flex items-center gap-2 bg-[#161B22] hover:bg-slate-800 border border-slate-800 hover:border-lime-400/40 px-3.5 py-1.5 rounded-xl text-left transition-all cursor-pointer shadow-sm"
+                  id="header-backup-status-inactive"
+                  title="Configure automatic offline backups to a PC folder"
                 >
-                  <CloudOff className="w-4 h-4 text-slate-500" />
-                  <span>Link Google Sheets</span>
+                  <Database className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  <div className="text-left leading-tight">
+                    <span className="block text-[10px] text-slate-400 font-semibold">
+                      Local DB Secure
+                    </span>
+                    <span className="block text-[8px] text-slate-500 mt-0.5">
+                      Offline Storage Only
+                    </span>
+                  </div>
                 </button>
               )}
             </div>
@@ -883,6 +763,7 @@ export default function App() {
                 attendance={attendance}
                 onImportData={handleImportData}
                 onClearDatabase={handleClearDatabase}
+                onRestoreBackup={handleRestoreBackup}
                 backupStatus={backupStatus}
                 onSelectBackupDirectory={handleSelectBackupDirectory}
                 onDisconnectBackupDirectory={handleDisconnectBackupDirectory}
@@ -896,65 +777,57 @@ export default function App() {
                 onResetLicense={handleResetLicense}
                 onUpdateGymDetails={handleUpdateGymDetails}
                 hardwareId={hardwareId}
+                trialDaysRemaining={trialDaysRemaining}
+                trialDaysElapsed={trialDaysElapsed}
+                isTrialExpired={isTrialExpired}
+                isReadOnly={isReadOnly}
+                isLicenseActive={isLicenseActive}
               />
             )}
           </main>
         </div>
       </div>
 
-      {/* 4. Firebase Authorized Domain Error Helpful Troubleshooting Modal */}
-      {authDomainError && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto" id="unauthorized-domain-modal">
-          <div className="bg-[#161B22] border border-slate-800 rounded-3xl max-w-lg w-full overflow-hidden shadow-2xl" id="domain-modal-content">
-            <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-900" id="domain-header">
-              <div className="flex items-center gap-2 text-amber-400">
-                <ShieldCheck className="w-5 h-5 shrink-0" />
-                <h3 className="text-white font-semibold font-display text-base">Firebase: Unauthorized Domain Error</h3>
-              </div>
-              <button 
-                onClick={() => setAuthDomainError(false)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                ✕
-              </button>
+      {/* Read-Only Mode Warning Modal */}
+      {showReadOnlyModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4" id="read-only-modal">
+          <div className="bg-[#161B22] border border-amber-500/30 rounded-3xl max-w-md w-full p-6 text-center space-y-5 shadow-2xl animate-scaleUp" id="read-only-modal-card">
+            <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto shadow-lg">
+              <Lock className="w-8 h-8" />
             </div>
-
-            <div className="p-6 space-y-5 text-sm leading-relaxed text-slate-300" id="domain-instructions">
-              <p className="text-xs text-slate-400">
-                You received an <code className="text-red-400 font-mono text-[11px] bg-red-400/5 px-1 rounded">auth/unauthorized-domain</code> error because Firebase Authentication blocks Google Sign-In requests originating from unrecognized addresses for client security.
+            <div className="space-y-2">
+              <h3 className="text-xl font-bold font-display text-white">7-Day Free Trial Expired</h3>
+              <p className="text-slate-300 text-xs leading-relaxed">
+                Your 7-day free trial has completed. You can view, search, filter, and export all existing records in <span className="text-amber-400 font-bold">Read-Only Mode</span>.
               </p>
-
-              <div className="bg-slate-900 border border-slate-800/80 rounded-2xl p-4.5 space-y-2.5">
-                <span className="block text-xs font-bold text-white uppercase tracking-wider">How to Fix This in 60 Seconds:</span>
-                <ol className="list-decimal list-inside text-xs space-y-2 text-slate-300">
-                  <li>Open your <a href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer" className="text-lime-400 hover:underline inline-flex items-center gap-0.5 font-semibold">Firebase Console ↗</a></li>
-                  <li>Go to <strong className="text-white">Authentication</strong> &rarr; click the <strong className="text-white">Settings</strong> tab.</li>
-                  <li>On the left sidebar, click <strong className="text-white">Authorized domains</strong>.</li>
-                  <li>Click <strong className="text-white">Add domain</strong>.</li>
-                  <li>Enter the host domain or local network IP you are running on (e.g. <code className="text-lime-400 font-mono">localhost</code>, <code className="text-lime-400 font-mono">127.0.0.1</code>, or your specific PC's local IP address).</li>
-                  <li>Click <strong className="text-white">Add</strong>. Changes are effective instantly!</li>
-                </ol>
-              </div>
-
-              <div className="text-xs text-slate-400 flex items-start gap-2.5 bg-lime-400/5 border border-lime-400/10 p-3.5 rounded-xl">
-                <span className="text-lg">💡</span>
-                <span>
-                  <strong>Tip:</strong> If you or your clients run this software locally on offline-first PCs, you can configure domain-level whitelists once, or run fully offline using the **Automated Local Backups** without linking any Google accounts.
-                </span>
-              </div>
+              <p className="text-slate-400 text-xs">
+                To add, edit, or delete records, please activate a 1-Year License key.
+              </p>
             </div>
 
-            <div className="p-4 border-t border-slate-800 bg-slate-900/60 flex justify-end">
+            <div className="flex flex-col gap-2.5 pt-2" id="read-only-modal-actions">
               <button
-                onClick={() => setAuthDomainError(false)}
-                className="bg-lime-400 hover:bg-lime-500 text-black px-5 py-2 rounded-xl font-bold text-xs transition-all cursor-pointer"
+                onClick={() => {
+                  setShowReadOnlyModal(false);
+                  setActiveTab('licensing');
+                }}
+                className="w-full bg-lime-400 hover:bg-lime-500 text-black py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-md shadow-lime-400/10 cursor-pointer"
+                id="activate-from-readonly-btn"
               >
-                Got It, Close
+                <Key className="w-4 h-4" /> Activate 1-Year License
+              </button>
+              <button
+                onClick={() => setShowReadOnlyModal(false)}
+                className="w-full bg-slate-900 hover:bg-slate-800 text-slate-300 py-2 rounded-xl text-xs font-semibold border border-slate-800 cursor-pointer"
+                id="close-readonly-modal-btn"
+              >
+                Close & Continue in Read-Only Mode
               </button>
             </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }

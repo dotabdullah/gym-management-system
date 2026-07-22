@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Payment, Member, Plan } from '../types';
+import { exportPaymentsToCSV } from '../lib/csvHelper';
 import { 
   DollarSign, 
   Search, 
@@ -11,7 +12,8 @@ import {
   Printer, 
   Download, 
   CheckCircle,
-  Tag
+  Tag,
+  Filter
 } from 'lucide-react';
 
 interface PaymentsListProps {
@@ -35,18 +37,51 @@ export default function PaymentsList({
   const [methodFilter, setMethodFilter] = useState('all');
   const [selectedReceipt, setSelectedReceipt] = useState<Payment | null>(null);
 
-  // Financial Stats Calculations
-  const totalRevenue = payments.reduce((sum, p) => sum + p.amount, 0);
-  const averageTicket = payments.length > 0 ? Math.round(totalRevenue / payments.length) : 0;
+  // Date Range Filters
+  const [dateFilterMode, setDateFilterMode] = useState<'all' | 'this_month' | 'select_month' | 'custom_range'>('all');
+  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().substring(0, 7)); // YYYY-MM
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+
+  // Date Range Filtering Logic
+  const dateFilteredPayments = payments.filter(p => {
+    if (dateFilterMode === 'all') return true;
+    
+    if (dateFilterMode === 'this_month') {
+      const currentMonth = new Date().toISOString().substring(0, 7);
+      return p.date.substring(0, 7) === currentMonth;
+    }
+
+    if (dateFilterMode === 'select_month') {
+      return p.date.substring(0, 7) === selectedMonth;
+    }
+
+    if (dateFilterMode === 'custom_range') {
+      if (!startDate && !endDate) return true;
+      if (startDate && !endDate) return p.date >= startDate;
+      if (!startDate && endDate) return p.date <= endDate;
+      return p.date >= startDate && p.date <= endDate;
+    }
+
+    return true;
+  });
+
+  // Financial Stats Calculations (based on dateFilteredPayments)
+  const totalRevenue = dateFilteredPayments.reduce((sum, p) => sum + p.amount, 0);
+  const averageTicket = dateFilteredPayments.length > 0 ? Math.round(totalRevenue / dateFilteredPayments.length) : 0;
   
   // Method breakdowns
-  const cashTotal = payments.filter(p => p.paymentMethod === 'Cash').reduce((sum, p) => sum + p.amount, 0);
-  const cardTotal = payments.filter(p => p.paymentMethod === 'Card').reduce((sum, p) => sum + p.amount, 0);
-  const bankTotal = payments.filter(p => p.paymentMethod === 'Bank Transfer').reduce((sum, p) => sum + p.amount, 0);
-  const otherTotal = payments.filter(p => p.paymentMethod === 'Other').reduce((sum, p) => sum + p.amount, 0);
+  const cashTotal = dateFilteredPayments.filter(p => p.paymentMethod === 'Cash').reduce((sum, p) => sum + p.amount, 0);
+  const cardTotal = dateFilteredPayments.filter(p => p.paymentMethod === 'Card').reduce((sum, p) => sum + p.amount, 0);
+  const bankTotal = dateFilteredPayments.filter(p => p.paymentMethod === 'Bank Transfer').reduce((sum, p) => sum + p.amount, 0);
+  const otherTotal = dateFilteredPayments.filter(p => p.paymentMethod === 'Other').reduce((sum, p) => sum + p.amount, 0);
 
-  // Filtered payments list
-  const filteredPayments = payments.filter(p => {
+  // Final Search + Method + Date filtered list
+  const filteredPayments = dateFilteredPayments.filter(p => {
     const member = members.find(m => m.id === p.memberId);
     const matchesSearch = member 
       ? member.name.toLowerCase().includes(searchTerm.toLowerCase())
@@ -55,6 +90,11 @@ export default function PaymentsList({
     return matchesSearch && matchesMethod;
   }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
+  // Export Ledger CSV
+  const handleExportCSV = () => {
+    exportPaymentsToCSV(filteredPayments, members, plans, `revenue_ledger_${dateFilterMode}`);
+  };
+
   // Generate Receipt Trigger
   const handlePrintReceipt = () => {
     window.print();
@@ -62,6 +102,70 @@ export default function PaymentsList({
 
   return (
     <div className="space-y-6" id="payments-list-container">
+      {/* Date Range Filter Bar */}
+      <div className="bg-[#161B22] border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 shadow-sm" id="ledger-date-filter-bar">
+        <div className="flex items-center gap-2">
+          <Calendar className="w-5 h-5 text-lime-400 shrink-0" />
+          <div>
+            <h4 className="text-white font-bold text-sm">Revenue Ledger Date Filter</h4>
+            <p className="text-slate-400 text-xs">Analyze revenue and transactions by specific month or custom range</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5" id="date-filter-controls">
+          <select
+            value={dateFilterMode}
+            onChange={(e) => setDateFilterMode(e.target.value as any)}
+            className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none cursor-pointer"
+            id="date-mode-select"
+          >
+            <option value="all">All Time Records</option>
+            <option value="this_month">This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
+            <option value="select_month">Select Month...</option>
+            <option value="custom_range">Custom Date Range...</option>
+          </select>
+
+          {dateFilterMode === 'select_month' && (
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none font-mono"
+              id="month-picker"
+            />
+          )}
+
+          {dateFilterMode === 'custom_range' && (
+            <div className="flex items-center gap-1.5" id="custom-range-inputs">
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none font-mono"
+                id="range-start-date"
+              />
+              <span className="text-slate-500 text-xs">to</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none font-mono"
+                id="range-end-date"
+              />
+            </div>
+          )}
+
+          <button
+            onClick={handleExportCSV}
+            className="bg-lime-400 hover:bg-lime-500 text-black px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-lime-400/5 ml-auto md:ml-0"
+            id="export-ledger-csv-btn"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export Ledger CSV
+          </button>
+        </div>
+      </div>
+
       {/* Financial Bento Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5" id="payments-stats-grid">
         <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="card-gross">
@@ -72,7 +176,7 @@ export default function PaymentsList({
           <h3 className="text-3xl font-bold text-white font-display mt-3">Rs. {totalRevenue}</h3>
           <p className="text-slate-500 text-xs mt-2 font-sans flex items-center gap-1">
             <TrendingUp className="w-3.5 h-3.5 text-lime-400" />
-            <span className="text-slate-400 font-medium">All recorded dues payments</span>
+            <span className="text-slate-400 font-medium">{dateFilteredPayments.length} payments in selected filter</span>
           </p>
         </div>
 
@@ -83,7 +187,7 @@ export default function PaymentsList({
           </div>
           <h3 className="text-3xl font-bold text-white font-display mt-3">Rs. {averageTicket}</h3>
           <p className="text-slate-500 text-xs mt-2 font-sans">
-            Across {payments.length} transactions
+            Across {dateFilteredPayments.length} transactions
           </p>
         </div>
 

@@ -18,6 +18,7 @@ export interface Member {
   notes: string;
   emergencyContactName: string;
   emergencyContactPhone: string;
+  photoUrl?: string;
   updatedAt: string;
 }
 

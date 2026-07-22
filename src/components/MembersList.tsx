@@ -1,5 +1,6 @@
-import { useState, FormEvent, MouseEvent } from 'react';
+import { useState, FormEvent, MouseEvent, ChangeEvent } from 'react';
 import { Member, Plan, Payment, AttendanceRecord } from '../types';
+import { exportMembersToCSV } from '../lib/csvHelper';
 import { 
   Search, 
   Filter, 
@@ -15,7 +16,12 @@ import {
   XCircle, 
   AlertCircle,
   PlusCircle,
-  FileText
+  FileText,
+  Upload,
+  Camera,
+  X,
+  Download,
+  Users
 } from 'lucide-react';
 
 interface MembersListProps {
@@ -41,6 +47,73 @@ export default function MembersList({
   onRecordPayment,
   onCheckIn
 }: MembersListProps) {
+  // Calculate remaining days and renewal date based on joinDate and last payment date
+  const getSubscriptionPeriod = (member: Member) => {
+    const plan = plans.find(p => p.id === member.planId);
+    if (!plan) {
+      return { 
+        daysRemaining: 0, 
+        formattedDueDate: 'N/A', 
+        statusText: 'No Plan', 
+        daysText: 'N/A', 
+        badgeColor: 'bg-slate-800 text-slate-400 border border-slate-700',
+        lastPaymentDate: null,
+        lastPaymentAmount: null
+      };
+    }
+
+    // Find payments for this member
+    const memberPayments = payments
+      .filter(p => p.memberId === member.id)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    // Cycle starts from last payment date or joining date
+    const baseDateStr = memberPayments.length > 0 ? memberPayments[0].date : member.joinDate;
+    const baseDate = new Date(baseDateStr || new Date().toISOString().split('T')[0]);
+    const nextDueDate = new Date(baseDate);
+    
+    // Add plan duration in months
+    nextDueDate.setMonth(nextDueDate.getMonth() + (plan.durationMonths || 1));
+
+    // Calculate remaining days
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    nextDueDate.setHours(0, 0, 0, 0);
+
+    const diffTime = nextDueDate.getTime() - today.getTime();
+    const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    const formattedDueDate = nextDueDate.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
+
+    let statusText = 'Active';
+    let daysText = `${daysRemaining} days left`;
+    let badgeColor = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+
+    if (daysRemaining < 0) {
+      statusText = 'Expired';
+      daysText = `${Math.abs(daysRemaining)} days overdue`;
+      badgeColor = 'bg-red-500/10 text-red-400 border border-red-500/20';
+    } else if (daysRemaining === 0) {
+      statusText = 'Due Today';
+      daysText = 'Due today';
+      badgeColor = 'bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse';
+    }
+
+    return {
+      daysRemaining,
+      formattedDueDate,
+      statusText,
+      daysText,
+      badgeColor,
+      lastPaymentDate: memberPayments.length > 0 ? memberPayments[0].date : null,
+      lastPaymentAmount: memberPayments.length > 0 ? memberPayments[0].amount : null
+    };
+  };
+
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'expired' | 'pending'>('all');
@@ -61,6 +134,8 @@ export default function MembersList({
   const [notes, setNotes] = useState('');
   const [emergencyName, setEmergencyName] = useState('');
   const [emergencyPhone, setEmergencyPhone] = useState('');
+  const [joinDate, setJoinDate] = useState('');
+  const [photoUrl, setPhotoUrl] = useState('');
 
   // Form states - Record Payment
   const [paymentAmount, setPaymentAmount] = useState('');
@@ -77,6 +152,8 @@ export default function MembersList({
     setNotes('');
     setEmergencyName('');
     setEmergencyPhone('');
+    setJoinDate(new Date().toISOString().split('T')[0]);
+    setPhotoUrl('');
   };
 
   // Open Edit Form
@@ -91,6 +168,30 @@ export default function MembersList({
     setNotes(m.notes || '');
     setEmergencyName(m.emergencyContactName || '');
     setEmergencyPhone(m.emergencyContactPhone || '');
+    setJoinDate(m.joinDate || new Date().toISOString().split('T')[0]);
+    setPhotoUrl(m.photoUrl || '');
+  };
+
+  // Handle Photo File Select & convert to Base64
+  const handlePhotoUpload = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 1500000) {
+      alert("Image is too large. Please select an image under 1.5MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64 = event.target?.result as string;
+      setPhotoUrl(base64);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemovePhoto = () => {
+    setPhotoUrl('');
   };
 
   // Handle Add Member Submit
@@ -101,12 +202,13 @@ export default function MembersList({
       name,
       email,
       phone,
-      joinDate: new Date().toISOString().split('T')[0],
+      joinDate: joinDate || new Date().toISOString().split('T')[0],
       planId: planId || plans[0]?.id,
       status,
       notes,
       emergencyContactName: emergencyName,
-      emergencyContactPhone: emergencyPhone
+      emergencyContactPhone: emergencyPhone,
+      photoUrl
     });
     setIsAddOpen(false);
     resetForm();
@@ -121,11 +223,13 @@ export default function MembersList({
       name,
       email,
       phone,
+      joinDate: joinDate || editingMember.joinDate || new Date().toISOString().split('T')[0],
       planId,
       status,
       notes,
       emergencyContactName: emergencyName,
       emergencyContactPhone: emergencyPhone,
+      photoUrl,
       updatedAt: new Date().toISOString()
     });
     setEditingMember(null);
@@ -167,8 +271,41 @@ export default function MembersList({
     alert(`Payment of Rs. ${paymentAmount} logged successfully!`);
   };
 
-  // Filtered members list
-  const filteredMembers = members.filter(m => {
+  // Date Range Filters for Athletes
+  const [dateFilterMode, setDateFilterMode] = useState<'all' | 'this_month' | 'select_month' | 'custom_range'>('all');
+  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().substring(0, 7)); // YYYY-MM
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+
+  // Date Range Filter Logic for Members
+  const dateFilteredMembers = members.filter(m => {
+    if (dateFilterMode === 'all') return true;
+
+    if (dateFilterMode === 'this_month') {
+      const currentMonth = new Date().toISOString().substring(0, 7);
+      return m.joinDate && m.joinDate.substring(0, 7) === currentMonth;
+    }
+
+    if (dateFilterMode === 'select_month') {
+      return m.joinDate && m.joinDate.substring(0, 7) === selectedMonth;
+    }
+
+    if (dateFilterMode === 'custom_range') {
+      if (!startDate && !endDate) return true;
+      if (startDate && !endDate) return m.joinDate >= startDate;
+      if (!startDate && endDate) return m.joinDate <= endDate;
+      return m.joinDate >= startDate && m.joinDate <= endDate;
+    }
+
+    return true;
+  });
+
+  // Final Filtered members list
+  const filteredMembers = dateFilteredMembers.filter(m => {
     const matchesSearch = 
       m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       m.phone.includes(searchTerm) ||
@@ -180,8 +317,76 @@ export default function MembersList({
     return matchesSearch && matchesStatus && matchesPlan;
   });
 
+  // Export Athletes CSV
+  const handleExportCSV = () => {
+    exportMembersToCSV(filteredMembers, plans, `athletes_${dateFilterMode}`);
+  };
+
   return (
     <div className="space-y-6" id="members-list-container">
+      {/* Date Range & Monthly Tracking Control Bar */}
+      <div className="bg-[#161B22] border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 shadow-sm" id="members-date-filter-bar">
+        <div className="flex items-center gap-2">
+          <Calendar className="w-5 h-5 text-lime-400 shrink-0" />
+          <div>
+            <h4 className="text-white font-bold text-sm">Athletes Joining & Activity Date Range</h4>
+            <p className="text-slate-400 text-xs">Track active members and new athlete registrations by month or custom range</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5" id="members-date-filter-controls">
+          <select
+            value={dateFilterMode}
+            onChange={(e) => setDateFilterMode(e.target.value as any)}
+            className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none cursor-pointer"
+            id="members-date-mode-select"
+          >
+            <option value="all">All Joined Athletes ({members.length})</option>
+            <option value="this_month">Joined This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
+            <option value="select_month">Joined Select Month...</option>
+            <option value="custom_range">Joined Custom Range...</option>
+          </select>
+
+          {dateFilterMode === 'select_month' && (
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none font-mono"
+              id="members-month-picker"
+            />
+          )}
+
+          {dateFilterMode === 'custom_range' && (
+            <div className="flex items-center gap-1.5" id="members-custom-range-inputs">
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none font-mono"
+                id="members-range-start-date"
+              />
+              <span className="text-slate-500 text-xs">to</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none font-mono"
+                id="members-range-end-date"
+              />
+            </div>
+          )}
+
+          <button
+            onClick={handleExportCSV}
+            className="bg-lime-400 hover:bg-lime-500 text-black px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-lime-400/5 ml-auto md:ml-0"
+            id="export-athletes-csv-btn"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export Athletes CSV
+          </button>
+        </div>
+      </div>
       {/* Search and Filters Header */}
       <div className="flex flex-col lg:flex-row gap-4 justify-between items-stretch lg:items-center bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="members-header-panel">
         <div className="flex-1 relative" id="search-input-wrapper">
@@ -268,8 +473,12 @@ export default function MembersList({
                       id={`member-row-${m.id}`}
                     >
                       <td className="py-3.5 px-5 flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full bg-slate-900 border border-slate-800 text-lime-400 font-display font-bold text-xs flex items-center justify-center">
-                          {m.name.split(' ').map(n => n[0]).join('')}
+                        <div className="w-9 h-9 rounded-full bg-slate-900 border border-slate-800 text-lime-400 font-display font-bold text-xs flex items-center justify-center overflow-hidden shrink-0">
+                          {m.photoUrl ? (
+                            <img src={m.photoUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                          ) : (
+                            m.name.split(' ').map(n => n[0]).join('')
+                          )}
                         </div>
                         <div>
                           <span className="block text-white font-semibold">{m.name}</span>
@@ -285,21 +494,24 @@ export default function MembersList({
                         <span className="block text-slate-500 text-xs">Joined {m.joinDate}</span>
                       </td>
                       <td className="py-3.5 px-4">
-                        {m.status === 'active' && (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                            <CheckCircle2 className="w-3 h-3" /> Active
-                          </span>
-                        )}
-                        {m.status === 'expired' && (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
-                            <XCircle className="w-3 h-3" /> Expired
-                          </span>
-                        )}
-                        {m.status === 'pending' && (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            <AlertCircle className="w-3 h-3" /> Pending
-                          </span>
-                        )}
+                        {(() => {
+                          const period = getSubscriptionPeriod(m);
+                          return (
+                            <div className="space-y-1">
+                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider ${period.badgeColor}`}>
+                                {period.daysRemaining > 0 ? (
+                                  <CheckCircle2 className="w-3 h-3" />
+                                ) : period.daysRemaining === 0 ? (
+                                  <AlertCircle className="w-3 h-3 animate-pulse text-amber-400" />
+                                ) : (
+                                  <XCircle className="w-3 h-3 text-red-400" />
+                                )}
+                                {period.statusText}
+                              </span>
+                              <span className="block text-[11px] text-slate-400 font-mono">{period.daysText}</span>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="py-3.5 px-5 text-right">
                         <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
@@ -358,32 +570,77 @@ export default function MembersList({
             <div className="space-y-5" id="member-detail-body">
               <div className="flex justify-between items-start" id="member-detail-header">
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-full bg-lime-400/15 border border-lime-400/20 text-lime-400 font-display font-bold text-sm flex items-center justify-center">
-                    {selectedMember.name.split(' ').map(n => n[0]).join('')}
+                  <div className="w-12 h-12 rounded-full bg-lime-400/15 border border-lime-400/20 text-lime-400 font-display font-bold text-sm flex items-center justify-center overflow-hidden shrink-0">
+                    {selectedMember.photoUrl ? (
+                      <img src={selectedMember.photoUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      selectedMember.name.split(' ').map(n => n[0]).join('')
+                    )}
                   </div>
                   <div>
-                    <h4 className="text-white font-bold font-display text-lg">{selectedMember.name}</h4>
-                    <span className="text-slate-500 font-mono text-xs">Joined {selectedMember.joinDate}</span>
+                    <h4 className="text-white font-bold font-display text-lg leading-snug">{selectedMember.name}</h4>
+                    <span className="text-slate-500 font-mono text-[11px] block mt-0.5">ID: {selectedMember.id}</span>
                   </div>
                 </div>
                 <button 
                   onClick={() => setSelectedMember(null)}
-                  className="text-slate-400 hover:text-white text-xs cursor-pointer"
+                  className="text-slate-400 hover:text-white text-xs cursor-pointer bg-slate-900 border border-slate-800 hover:bg-slate-850 px-2.5 py-1 rounded-lg"
                   id="close-details-btn"
                 >
                   ✕ Close
                 </button>
               </div>
 
-              {/* Status Banner */}
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex justify-between items-center text-xs" id="detail-status-banner">
-                <span className="text-slate-400">Account status</span>
-                {selectedMember.status === 'active' ? (
-                  <span className="text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">Active</span>
-                ) : (
-                  <span className="text-red-400 font-semibold bg-red-500/10 px-2 py-0.5 rounded border border-red-500/20">Expired</span>
-                )}
-              </div>
+              {/* Dynamic Subscription / Fee Period Tracker Card */}
+              {(() => {
+                const period = getSubscriptionPeriod(selectedMember);
+                const plan = plans.find(p => p.id === selectedMember.planId);
+                return (
+                  <div className="bg-[#1C2128] border border-slate-800 rounded-2xl p-4.5 space-y-3.5" id="fee-period-tracker-card">
+                    <span className="block text-[10px] text-lime-400 uppercase font-bold tracking-wider">Fee Period Tracker</span>
+                    
+                    <div className="grid grid-cols-2 gap-3 text-[11px]">
+                      <div>
+                        <span className="block text-slate-500">Package Tier</span>
+                        <span className="block text-white font-semibold mt-0.5">{plan?.name || 'Default Basic'}</span>
+                      </div>
+                      <div>
+                        <span className="block text-slate-500">Duration Cycle</span>
+                        <span className="block text-white font-semibold mt-0.5">{plan ? `${plan.durationMonths} Month(s)` : 'N/A'}</span>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-850 pt-2.5 grid grid-cols-2 gap-3 text-[11px]">
+                      <div>
+                        <span className="block text-slate-500">Gym Joined Date</span>
+                        <span className="block text-white font-semibold mt-0.5">{selectedMember.joinDate}</span>
+                      </div>
+                      <div>
+                        <span className="block text-slate-500">Next Due Date</span>
+                        <span className="block text-lime-400 font-semibold mt-0.5 font-mono">{period.formattedDueDate}</span>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-850 pt-2.5 flex items-center justify-between text-[11px]">
+                      <div>
+                        <span className="block text-slate-500">Remaining Period</span>
+                        <span className="block text-slate-300 font-medium mt-0.5">{period.daysText}</span>
+                      </div>
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${period.badgeColor}`}>
+                        {period.statusText}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-900/60 border border-slate-800/85 rounded-xl p-3 text-[11px] text-slate-400 leading-normal">
+                      {period.lastPaymentDate ? (
+                        <span>Last payment of <strong className="text-white">Rs. {period.lastPaymentAmount}</strong> was logged on <strong className="text-white">{period.lastPaymentDate}</strong>.</span>
+                      ) : (
+                        <span className="text-amber-400/80">⚠️ No subscription payments logged yet. Fee tracker is active from gym joining date.</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Detail Items */}
               <div className="space-y-3.5 text-xs text-slate-300" id="detail-items">
@@ -530,6 +787,55 @@ export default function MembersList({
                     <option value="expired">Expired</option>
                     <option value="pending">Pending</option>
                   </select>
+                </div>
+
+                <div className="col-span-2" id="form-field-joindate">
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Gym Joining Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={joinDate}
+                    onChange={(e) => setJoinDate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:ring-1 focus:ring-lime-400"
+                  />
+                </div>
+
+                <div className="col-span-2 border-t border-slate-800 pt-4" id="form-field-photo-upload">
+                  <span className="block text-[10px] font-bold text-slate-500 uppercase mb-3">Profile Photo (Optional)</span>
+                  <div className="flex items-center gap-4">
+                    <div className="w-16 h-16 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center overflow-hidden shrink-0">
+                      {photoUrl ? (
+                        <img src={photoUrl} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      ) : (
+                        <Camera className="w-6 h-6 text-slate-500" />
+                      )}
+                    </div>
+                    <div className="flex-1 space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                          <Upload className="w-3.5 h-3.5 text-lime-400" />
+                          {photoUrl ? 'Change Photo' : 'Upload Photo'}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={handlePhotoUpload}
+                            className="hidden"
+                          />
+                        </label>
+                        {photoUrl && (
+                          <button
+                            type="button"
+                            onClick={handleRemovePhoto}
+                            className="bg-red-500/10 hover:bg-red-500/20 text-red-400 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500">Supported formats: JPG, PNG, GIF. Max size 1.5MB.</p>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="col-span-2 border-t border-slate-800 pt-4" id="form-field-emergency">
