@@ -55,62 +55,9 @@ Designed for fitness centers, martial arts academies, and local gyms to manage m
 - **Node.js**: v18.0 or higher recommended
 
 ---
-
-## 🚀 Quick Start Guide
-
-### 1. Clone & Install Dependencies
-```bash
-git clone https://github.com/YOUR_USERNAME/gym-management-system.git
-cd gym-management-system
-npm install
-```
-
-### 2. Run Local Development Server
-```bash
-npm run dev
-```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
-
-### 3. Build Web Bundle
-```bash
-npm run build
-```
-
----
-
-## 💻 Packaging for Desktop with Tauri
-
-To compile this web app into a native Windows `.exe`, macOS `.app`, or Linux binary:
-
-### 1. Initialize Tauri in your local repository
-```bash
-# If Tauri is not initialized yet in your local folder:
-npx tauri init
-```
-
-### 2. Configure `tauri.conf.json`
-Ensure your `tauri.conf.json` settings point to the Vite build directory and dev server:
-- **`devUrl`**: `http://localhost:3000`
-- **`frontendDist`**: `../dist`
-
-### 3. Build Executable
-```bash
-# Run Tauri build via npm script or npx
-npm run tauri build
-# OR
-npx tauri build
-```
-The compiled installer / executable will be saved in `src-tauri/target/release/bundle/`.
-
----
-
-## 🔑 Default Credentials & Developer Codes
-
-| Feature | Code / Key | Description |
-|---|---|---|
-| **Developer Master Passcode** | `GYM-DEV-9988` or `ADMIN2026` | Unlocks Creator Mode in the Licensing Tab |
-| **Standard Activation Key Format** | `GYM-ACTV-XXXX-XXXX` | Unlocks station for general testing |
-| **1-Year Hardware-Locked Key** | `GYM-1YR-[HW_SUFFIX]-[XXXX]-[XXXX]` | Generated via Creator Panel bound to target HWID |
+## Developed by 
+- **Abdullah Shahzad""
+- Founder of **XpertsWP**
 
 ---
 
