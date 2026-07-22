@@ -56,7 +56,7 @@ Designed for fitness centers, martial arts academies, and local gyms to manage m
 
 ---
 ## Developed by 
-- **Abdullah Shahzad""
+- **Abdullah Shahzad**
 - Founder of **XpertsWP**
 
 ---
