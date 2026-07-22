@@ -1,3 +1,4 @@
+![Gym Management System](iron_ledger_app_banner_img.png)
 # Gym Management System & Desktop Station
 
 A high-performance, desktop-ready Gym Management Application built with **React**, **TypeScript**, **Tailwind CSS**, **Lucide Icons**, and optimized for **Tauri** desktop app distribution. 
