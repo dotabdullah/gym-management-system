@@ -57,7 +57,9 @@ Designed for fitness centers, martial arts academies, and local gyms to manage m
 ---
 ## Developed by 
 - **Abdullah Shahzad**
-- Founder of **XpertsWP**
+- Founder of **[XpertsWP](https://xpertswp.com)**
+- Website: https://xpertswp.com/
+- Contact No.: [+92 311 1765486](+923111765486)
 
 ---
 
