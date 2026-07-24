@@ -66,6 +66,42 @@ export default function App() {
   // Client workstation variables
   const [hardwareId, setHardwareId] = useState<string>('');
 
+  // Online / Offline Internet Connection Status
+  const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Gym Country Code for WhatsApp Messaging
+  const [gymCountryCode, setGymCountryCode] = useState<string>(() => {
+    return localStorage.getItem('gym_country_code') || '+92';
+  });
+
+  const handleUpdateGymCountryCode = (code: string) => {
+    setGymCountryCode(code);
+    localStorage.setItem('gym_country_code', code);
+  };
+
+  // Gym Currency Symbol / Code
+  const [gymCurrency, setGymCurrency] = useState<string>(() => {
+    return localStorage.getItem('gym_currency') || 'PKR';
+  });
+
+  const handleUpdateGymCurrency = (currency: string) => {
+    setGymCurrency(currency);
+    localStorage.setItem('gym_currency', currency);
+  };
+
   // Local Folder Auto-Backup State
   const [backupDirectory, setBackupDirectory] = useState<FileSystemDirectoryHandle | null>(null);
   const [backupStatus, setBackupStatus] = useState<{
@@ -340,10 +376,20 @@ export default function App() {
     };
     const updatedPayments = [newPayment, ...payments];
     
-    // Auto-extend member status if expired
+    // Auto-extend member status if expired & update due / advance balance
     const updatedMembers = members.map(m => {
-      if (m.id === p.memberId && m.status === 'expired') {
-        return { ...m, status: 'active' as const, updatedAt: new Date().toISOString() };
+      if (m.id === p.memberId) {
+        const currentDue = p.dueAmount !== undefined ? p.dueAmount : 0;
+        const currentExtra = p.extraAmount !== undefined ? p.extraAmount : 0;
+
+        return { 
+          ...m, 
+          status: m.status === 'expired' ? ('active' as const) : m.status,
+          planId: p.planId || m.planId,
+          dueBalance: currentDue > 0 ? currentDue : (currentExtra > 0 ? 0 : m.dueBalance),
+          advanceBalance: currentExtra > 0 ? currentExtra : (currentDue > 0 ? 0 : m.advanceBalance),
+          updatedAt: new Date().toISOString() 
+        };
       }
       return m;
     });
@@ -363,6 +409,29 @@ export default function App() {
       checkInTime: new Date().toLocaleTimeString('en-US', { hour12: false })
     };
     const updated = [newRecord, ...attendance];
+    setAttendance(updated);
+    triggerAutoSyncIfOnline(members, payments, plans, updated);
+  };
+
+  // Custom / Back-dated Check-In Handler
+  const handleCustomCheckIn = (memberId: string, customDate: string, customTime?: string) => {
+    if (!checkWritePermission()) return;
+    const timeStr = customTime || new Date().toLocaleTimeString('en-US', { hour12: false });
+    const newRecord: AttendanceRecord = {
+      id: `att-${Date.now()}`,
+      memberId,
+      date: customDate || new Date().toISOString().split('T')[0],
+      checkInTime: timeStr
+    };
+    const updated = [newRecord, ...attendance];
+    setAttendance(updated);
+    triggerAutoSyncIfOnline(members, payments, plans, updated);
+  };
+
+  // Delete Attendance Log Handler
+  const handleDeleteAttendance = (attendanceId: string) => {
+    if (!checkWritePermission()) return;
+    const updated = attendance.filter(a => a.id !== attendanceId);
     setAttendance(updated);
     triggerAutoSyncIfOnline(members, payments, plans, updated);
   };
@@ -395,13 +464,24 @@ export default function App() {
   };
 
   // Bulk Data Manager Handlers
-  const handleImportData = (importedMembers: Member[], importedPayments: Payment[]) => {
+  const handleImportData = (
+    importedMembers: Member[], 
+    importedPayments: Payment[], 
+    importedAttendance?: AttendanceRecord[]
+  ) => {
     if (!checkWritePermission()) return;
     const updatedMembers = [...importedMembers, ...members];
     const updatedPayments = [...importedPayments, ...payments];
+    const updatedAttendance = importedAttendance && importedAttendance.length > 0 
+      ? [...importedAttendance, ...attendance] 
+      : attendance;
+
     setMembers(updatedMembers);
     setPayments(updatedPayments);
-    triggerAutoSyncIfOnline(updatedMembers, updatedPayments, plans, attendance);
+    if (importedAttendance && importedAttendance.length > 0) {
+      setAttendance(updatedAttendance);
+    }
+    triggerAutoSyncIfOnline(updatedMembers, updatedPayments, plans, updatedAttendance);
   };
 
   const handleClearDatabase = (clearMembers: boolean, clearPayments: boolean, clearAttendance: boolean) => {
@@ -655,8 +735,31 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Header PC Backup Status Widget */}
-            <div className="flex items-center gap-3" id="header-backup-widget">
+            {/* Right Header PC Backup Status & Internet Connection Widget */}
+            <div className="flex items-center gap-2.5" id="header-widgets">
+              {/* Top Right Internet Status Indicator */}
+              {isOnline ? (
+                <div 
+                  className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm" 
+                  id="header-internet-active-badge" 
+                  title="Internet Active - Ready for WhatsApp messaging & web tools"
+                >
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="hidden sm:inline">Internet Active</span>
+                  <span className="sm:hidden">Online</span>
+                </div>
+              ) : (
+                <div 
+                  className="flex items-center gap-1.5 bg-amber-500/10 border border-amber-500/25 text-amber-400 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm" 
+                  id="header-internet-offline-badge" 
+                  title="Offline Mode - Software working seamlessly on local PC database"
+                >
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  <span className="hidden sm:inline">Offline Mode</span>
+                  <span className="sm:hidden">Offline</span>
+                </div>
+              )}
+
               {backupStatus.isConfigured ? (
                 <button
                   onClick={() => setActiveTab('data-manager')}
@@ -704,6 +807,10 @@ export default function App() {
                 plans={plans}
                 attendance={attendance}
                 licenseStatus={license.status}
+                gymName={license.gymName || license.ownerName}
+                gymCountryCode={gymCountryCode}
+                gymCurrency={gymCurrency}
+                isOnline={isOnline}
                 onNavigate={(tab) => setActiveTab(tab)}
                 onQuickCheckIn={() => setActiveTab('attendance')}
                 onQuickAddMember={() => setActiveTab('members')}
@@ -717,11 +824,17 @@ export default function App() {
                 plans={plans}
                 payments={payments}
                 attendance={attendance}
+                gymName={license.gymName || license.ownerName}
+                gymCountryCode={gymCountryCode}
+                gymCurrency={gymCurrency}
+                isOnline={isOnline}
                 onAddMember={handleAddMember}
                 onUpdateMember={handleUpdateMember}
                 onDeleteMember={handleDeleteMember}
                 onRecordPayment={handleRecordPayment}
                 onCheckIn={handleCheckIn}
+                onCustomCheckIn={handleCustomCheckIn}
+                onDeleteAttendance={handleDeleteAttendance}
               />
             )}
 
@@ -733,6 +846,7 @@ export default function App() {
                 gymName={license.gymName || license.ownerName}
                 gymPhone={license.phone}
                 gymAddress={license.address}
+                gymCurrency={gymCurrency}
               />
             )}
 
@@ -740,6 +854,7 @@ export default function App() {
               <PlansManager 
                 plans={plans}
                 members={members}
+                gymCurrency={gymCurrency}
                 onAddPlan={handleAddPlan}
                 onUpdatePlan={handleUpdatePlan}
                 onDeletePlan={handleDeletePlan}
@@ -761,6 +876,12 @@ export default function App() {
                 payments={payments}
                 plans={plans}
                 attendance={attendance}
+                gymName={license.gymName || license.ownerName}
+                gymCountryCode={gymCountryCode}
+                onUpdateGymCountryCode={handleUpdateGymCountryCode}
+                gymCurrency={gymCurrency}
+                onUpdateGymCurrency={handleUpdateGymCurrency}
+                isOnline={isOnline}
                 onImportData={handleImportData}
                 onClearDatabase={handleClearDatabase}
                 onRestoreBackup={handleRestoreBackup}

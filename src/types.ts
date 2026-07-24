@@ -19,6 +19,8 @@ export interface Member {
   emergencyContactName: string;
   emergencyContactPhone: string;
   photoUrl?: string;
+  dueBalance?: number; // Outstanding remaining dues owed by athlete
+  advanceBalance?: number; // Extra payment credit paid in advance
   updatedAt: string;
 }
 
@@ -26,7 +28,10 @@ export interface Payment {
   id: string;
   memberId: string;
   planId: string;
-  amount: number;
+  amount: number; // Actual amount received from athlete
+  planPrice?: number; // Original package rate
+  dueAmount?: number; // Remaining dues left on this payment
+  extraAmount?: number; // Extra payment made above package price
   date: string;
   paymentMethod: 'Cash' | 'Card' | 'Bank Transfer' | 'Other';
   notes: string;

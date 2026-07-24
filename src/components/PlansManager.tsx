@@ -1,5 +1,6 @@
 import { useState, FormEvent } from 'react';
 import { Plan, Member } from '../types';
+import { getCurrencySymbol } from '../lib/whatsappHelper';
 import { 
   PlusCircle, 
   Trash2, 
@@ -14,6 +15,7 @@ import {
 interface PlansManagerProps {
   plans: Plan[];
   members: Member[];
+  gymCurrency?: string;
   onAddPlan: (plan: Omit<Plan, 'id' | 'updatedAt'>) => void;
   onUpdatePlan: (plan: Plan) => void;
   onDeletePlan: (id: string) => void;
@@ -22,10 +24,12 @@ interface PlansManagerProps {
 export default function PlansManager({
   plans,
   members,
+  gymCurrency = 'PKR',
   onAddPlan,
   onUpdatePlan,
   onDeletePlan
 }: PlansManagerProps) {
+  const currSymbol = getCurrencySymbol(gymCurrency);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingPlan, setEditingPlan] = useState<Plan | null>(null);
 
@@ -147,7 +151,7 @@ export default function PlansManager({
                 </div>
 
                 <div className="flex items-baseline" id={`plan-price-block-${p.id}`}>
-                  <span className="text-white text-3xl font-extrabold font-display">Rs. {p.price}</span>
+                  <span className="text-white text-3xl font-extrabold font-display">{currSymbol} {p.price.toLocaleString()}</span>
                   <span className="text-slate-500 text-xs ml-1 font-medium">/ term</span>
                 </div>
 

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Member, Payment, Plan, AttendanceRecord } from '../types';
+import { generateWhatsAppReminderMessage, openWhatsAppLink, getCurrencySymbol } from '../lib/whatsappHelper';
 import { 
   Users, 
   DollarSign, 
@@ -10,7 +11,8 @@ import {
   Clock, 
   UserPlus, 
   CreditCard, 
-  Key 
+  Key,
+  MessageCircle
 } from 'lucide-react';
 import { 
   AreaChart, 
@@ -30,6 +32,10 @@ interface DashboardProps {
   plans: Plan[];
   attendance: AttendanceRecord[];
   licenseStatus: string;
+  gymName?: string;
+  gymCountryCode?: string;
+  gymCurrency?: string;
+  isOnline?: boolean;
   onNavigate: (tab: string) => void;
   onQuickCheckIn: () => void;
   onQuickAddMember: () => void;
@@ -42,11 +48,16 @@ export default function Dashboard({
   plans,
   attendance,
   licenseStatus,
+  gymName = 'Alpha Gym Center',
+  gymCountryCode = '+92',
+  gymCurrency = 'PKR',
+  isOnline = true,
   onNavigate,
   onQuickCheckIn,
   onQuickAddMember,
   onQuickAddPayment
 }: DashboardProps) {
+  const currSymbol = getCurrencySymbol(gymCurrency);
   // 1. Calculate Statistics
   const activeMembers = members.filter(m => m.status === 'active');
   const expiredMembers = members.filter(m => m.status === 'expired');
@@ -109,14 +120,14 @@ export default function Dashboard({
           <div className="flex justify-between items-start" id="stat-2-header">
             <div>
               <p className="text-slate-400 text-xs font-semibold uppercase tracking-wider font-sans">July Revenue</p>
-              <h3 className="text-3xl font-bold font-display text-white mt-2">Rs. {monthlyRevenue}</h3>
+              <h3 className="text-3xl font-bold font-display text-white mt-2">{currSymbol} {monthlyRevenue.toLocaleString()}</h3>
             </div>
             <div className="bg-blue-400/10 p-3 rounded-xl text-blue-400" id="icon-container-2">
               <DollarSign className="w-5 h-5" id="icon-monthly-revenue" />
             </div>
           </div>
           <div className="flex items-center gap-1 mt-4 text-xs text-slate-400" id="stat-2-trend">
-            <span className="text-green-400 font-medium">Total: Rs. {totalRevenue}</span>
+            <span className="text-green-400 font-medium">Total: {currSymbol} {totalRevenue.toLocaleString()}</span>
             <span className="text-slate-500">all-time</span>
           </div>
           <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-blue-400/5 to-transparent rounded-bl-full pointer-events-none" />
@@ -317,17 +328,44 @@ export default function Dashboard({
                       <span className="block text-slate-400 text-xs mt-0.5">{member.phone} • {plan?.name || 'No Plan'}</span>
                     </div>
                   </div>
-                  <div className="text-right" id={`renewal-action-${member.id}`}>
-                    <span className="inline-block px-2.5 py-1 rounded-full text-xs font-semibold bg-lime-400/10 text-lime-400 border border-lime-400/20">
-                      Renewal Due
-                    </span>
-                    <button 
-                      onClick={onQuickAddPayment}
-                      className="block text-xs text-slate-400 hover:text-white mt-1 underline transition-colors cursor-pointer"
-                      id={`renew-btn-${member.id}`}
-                    >
-                      Process Payment
-                    </button>
+                  <div className="text-right flex items-center gap-2" id={`renewal-action-${member.id}`}>
+                    {member.phone && (
+                      <button
+                        onClick={() => {
+                          if (!isOnline) {
+                            alert("Internet connection required to launch WhatsApp Web / App. Please connect to internet.");
+                          }
+                          const msg = generateWhatsAppReminderMessage({
+                            athleteName: member.name,
+                            phone: member.phone,
+                            countryCode: gymCountryCode,
+                            daysLeft: 1, // Impending 1-day expiration
+                            planName: plan?.name || 'Standard Plan',
+                            gymName: gymName,
+                            availablePlans: plans.map(p => ({ name: p.name, price: p.price, durationMonths: p.durationMonths }))
+                          });
+                          openWhatsAppLink(member.phone, gymCountryCode, msg);
+                        }}
+                        title={`Send WhatsApp Reminder to ${member.name}`}
+                        className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 p-2 rounded-xl transition-all flex items-center gap-1 text-xs font-bold cursor-pointer"
+                        id={`whatsapp-dash-btn-${member.id}`}
+                      >
+                        <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="hidden sm:inline">WhatsApp</span>
+                      </button>
+                    )}
+                    <div>
+                      <span className="inline-block px-2.5 py-1 rounded-full text-xs font-semibold bg-lime-400/10 text-lime-400 border border-lime-400/20">
+                        Renewal Due
+                      </span>
+                      <button 
+                        onClick={onQuickAddPayment}
+                        className="block text-xs text-slate-400 hover:text-white mt-1 underline transition-colors cursor-pointer text-right w-full"
+                        id={`renew-btn-${member.id}`}
+                      >
+                        Process Payment
+                      </button>
+                    </div>
                   </div>
                 </div>
               );

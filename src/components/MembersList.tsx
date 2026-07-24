@@ -1,6 +1,14 @@
-import { useState, FormEvent, MouseEvent, ChangeEvent } from 'react';
+import { useState, useEffect, FormEvent, MouseEvent, ChangeEvent } from 'react';
 import { Member, Plan, Payment, AttendanceRecord } from '../types';
-import { exportMembersToCSV } from '../lib/csvHelper';
+import { exportMembersToCSV, exportAttendanceToCSV } from '../lib/csvHelper';
+import { 
+  generateWhatsAppReminderMessage, 
+  openWhatsApp,
+  openWhatsAppLink, 
+  formatPhoneNumberForWhatsApp,
+  getCurrencySymbol,
+  getWhatsAppDirectUrl
+} from '../lib/whatsappHelper';
 import { 
   Search, 
   Filter, 
@@ -21,7 +29,14 @@ import {
   Camera,
   X,
   Download,
-  Users
+  Users,
+  Clock,
+  MessageCircle,
+  Send,
+  Globe,
+  CreditCard,
+  Copy,
+  Check
 } from 'lucide-react';
 
 interface MembersListProps {
@@ -29,11 +44,17 @@ interface MembersListProps {
   plans: Plan[];
   payments: Payment[];
   attendance: AttendanceRecord[];
+  gymName?: string;
+  gymCountryCode?: string;
+  gymCurrency?: string;
+  isOnline?: boolean;
   onAddMember: (member: Omit<Member, 'id' | 'updatedAt'>) => void;
   onUpdateMember: (member: Member) => void;
   onDeleteMember: (id: string) => void;
   onRecordPayment: (payment: Omit<Payment, 'id' | 'updatedAt'>) => void;
   onCheckIn: (memberId: string) => void;
+  onCustomCheckIn?: (memberId: string, customDate: string, customTime?: string) => void;
+  onDeleteAttendance?: (id: string) => void;
 }
 
 export default function MembersList({
@@ -41,12 +62,21 @@ export default function MembersList({
   plans,
   payments,
   attendance,
+  gymName = 'Gym Management Center',
+  gymCountryCode = '+92',
+  gymCurrency = 'PKR',
+  isOnline = true,
   onAddMember,
   onUpdateMember,
   onDeleteMember,
   onRecordPayment,
-  onCheckIn
+  onCheckIn,
+  onCustomCheckIn,
+  onDeleteAttendance
 }: MembersListProps) {
+  const currSymbol = getCurrencySymbol(gymCurrency);
+  const [isCopiedWhatsApp, setIsCopiedWhatsApp] = useState(false);
+  const [isCopiedUrl, setIsCopiedUrl] = useState(false);
   // Calculate remaining days and renewal date based on joinDate and last payment date
   const getSubscriptionPeriod = (member: Member) => {
     const plan = plans.find(p => p.id === member.planId);
@@ -253,25 +283,61 @@ export default function MembersList({
     alert("Check-in recorded successfully for today!");
   };
 
-  // Handle Payment Submit
+  // Selected Plan state in Payment Modal
+  const [selectedPaymentPlanId, setSelectedPaymentPlanId] = useState<string>('');
+
+  // When payment modal opens, initialize selected plan ID
+  useEffect(() => {
+    if (isPaymentOpen) {
+      setSelectedPaymentPlanId(isPaymentOpen.planId || plans[0]?.id || '');
+    }
+  }, [isPaymentOpen, plans]);
+
+  // Handle Payment Submit with Dues and Extra/Advance Calculation
   const handlePaymentSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!isPaymentOpen || !paymentAmount) return;
+
+    const currentMember = isPaymentOpen;
+    const targetPlanId = selectedPaymentPlanId || currentMember.planId || plans[0]?.id || '';
+    const currentPlan = plans.find(p => p.id === targetPlanId);
+    const planPrice = currentPlan ? currentPlan.price : 0;
+    const previousDues = currentMember.dueBalance || 0;
+    const previousAdvance = currentMember.advanceBalance || 0;
+    
+    // Total required to cover current plan + previous dues - previous advance
+    const totalRequired = Math.max(0, (planPrice + previousDues) - previousAdvance);
+    const paid = Number(paymentAmount) || 0;
+
+    let dueAmount = 0;
+    let extraAmount = 0;
+
+    if (paid < totalRequired) {
+      dueAmount = totalRequired - paid;
+    } else if (paid > totalRequired) {
+      extraAmount = paid - totalRequired;
+    }
+
     onRecordPayment({
-      memberId: isPaymentOpen.id,
-      planId: isPaymentOpen.planId,
-      amount: Number(paymentAmount),
+      memberId: currentMember.id,
+      planId: targetPlanId,
+      amount: paid,
+      planPrice,
+      dueAmount,
+      extraAmount,
       date: new Date().toISOString().split('T')[0],
       paymentMethod,
       notes: paymentNotes
     });
+
     setIsPaymentOpen(null);
     setPaymentAmount('');
     setPaymentNotes('');
-    alert(`Payment of Rs. ${paymentAmount} logged successfully!`);
+    alert(`Payment of Rs. ${paid.toLocaleString()} logged successfully!${dueAmount > 0 ? ` Remaining Due: Rs. ${dueAmount.toLocaleString()}` : ''}${extraAmount > 0 ? ` Extra Advance Saved: Rs. ${extraAmount.toLocaleString()}` : ''}`);
   };
 
-  // Date Range Filters for Athletes
+  // Date Range Filters for Athletes (Joining Date vs Check-In Activity Date vs Payment Ledger Date)
+  const [dateFilterType, setDateFilterType] = useState<'join_date' | 'checkin_date' | 'payment_date'>('join_date');
   const [dateFilterMode, setDateFilterMode] = useState<'all' | 'this_month' | 'select_month' | 'custom_range'>('all');
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().substring(0, 7)); // YYYY-MM
   const [startDate, setStartDate] = useState(() => {
@@ -281,28 +347,179 @@ export default function MembersList({
   });
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
 
-  // Date Range Filter Logic for Members
+  // Selected Athlete-Specific Attendance Date Filter State
+  const [athleteAttFilterMode, setAthleteAttFilterMode] = useState<'all' | 'this_month' | 'select_month' | 'custom_range'>('all');
+  const [athleteAttSelectedMonth, setAthleteAttSelectedMonth] = useState(() => new Date().toISOString().substring(0, 7));
+  const [athleteAttStartDate, setAthleteAttStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split('T')[0];
+  });
+  const [athleteAttEndDate, setAthleteAttEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+
+  // Selected Athlete-Specific Payment & Dues Date Filter State
+  const [athletePayFilterMode, setAthletePayFilterMode] = useState<'all' | 'this_month' | 'select_month' | 'custom_range'>('all');
+  const [athletePaySelectedMonth, setAthletePaySelectedMonth] = useState(() => new Date().toISOString().substring(0, 7));
+  const [athletePayStartDate, setAthletePayStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split('T')[0];
+  });
+  const [athletePayEndDate, setAthletePayEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+
+  // Custom / Back-Dated Check-In Modal State
+  const [isCustomCheckInModalOpen, setIsCustomCheckInModalOpen] = useState(false);
+  const [customCheckInDate, setCustomCheckInDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [customCheckInTime, setCustomCheckInTime] = useState(() => new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }));
+  const [customCheckInMemberId, setCustomCheckInMemberId] = useState<string>('');
+
+  // WhatsApp Reminder Preview Modal State
+  const [isWhatsAppModalOpen, setIsWhatsAppModalOpen] = useState(false);
+  const [whatsAppMember, setWhatsAppMember] = useState<Member | null>(null);
+  const [whatsAppCustomMessage, setWhatsAppCustomMessage] = useState('');
+
+  const handleOpenWhatsAppModal = (member: Member) => {
+    if (!isOnline) {
+      alert("Note: Internet connection is needed to launch WhatsApp Web / App.");
+    }
+    const subInfo = getSubscriptionPeriod(member);
+    const plan = plans.find(p => p.id === member.planId);
+    
+    const msg = generateWhatsAppReminderMessage({
+      athleteName: member.name,
+      phone: member.phone,
+      countryCode: gymCountryCode,
+      daysLeft: subInfo.daysRemaining,
+      planName: plan?.name || 'Standard Package',
+      gymName: gymName,
+      availablePlans: plans.map(p => ({ name: p.name, price: p.price, durationMonths: p.durationMonths }))
+    });
+
+    setWhatsAppMember(member);
+    setWhatsAppCustomMessage(msg);
+    setIsWhatsAppModalOpen(true);
+  };
+
+  // Date Range Filter Logic for Members (Joining Date OR Check-In Activity Date)
   const dateFilteredMembers = members.filter(m => {
     if (dateFilterMode === 'all') return true;
 
-    if (dateFilterMode === 'this_month') {
-      const currentMonth = new Date().toISOString().substring(0, 7);
-      return m.joinDate && m.joinDate.substring(0, 7) === currentMonth;
-    }
+    if (dateFilterType === 'join_date') {
+      if (dateFilterMode === 'this_month') {
+        const currentMonth = new Date().toISOString().substring(0, 7);
+        return m.joinDate && m.joinDate.substring(0, 7) === currentMonth;
+      }
 
-    if (dateFilterMode === 'select_month') {
-      return m.joinDate && m.joinDate.substring(0, 7) === selectedMonth;
-    }
+      if (dateFilterMode === 'select_month') {
+        return m.joinDate && m.joinDate.substring(0, 7) === selectedMonth;
+      }
 
-    if (dateFilterMode === 'custom_range') {
-      if (!startDate && !endDate) return true;
-      if (startDate && !endDate) return m.joinDate >= startDate;
-      if (!startDate && endDate) return m.joinDate <= endDate;
-      return m.joinDate >= startDate && m.joinDate <= endDate;
+      if (dateFilterMode === 'custom_range') {
+        if (!startDate && !endDate) return true;
+        if (startDate && !endDate) return m.joinDate >= startDate;
+        if (!startDate && endDate) return m.joinDate <= endDate;
+        return m.joinDate >= startDate && m.joinDate <= endDate;
+      }
+    } else if (dateFilterType === 'payment_date') {
+      // Payment & Ledger date filtering
+      const memberPayments = payments.filter(p => p.memberId === m.id);
+      if (dateFilterMode === 'this_month') {
+        const currentMonth = new Date().toISOString().substring(0, 7);
+        return memberPayments.some(p => p.date.substring(0, 7) === currentMonth);
+      }
+
+      if (dateFilterMode === 'select_month') {
+        return memberPayments.some(p => p.date.substring(0, 7) === selectedMonth);
+      }
+
+      if (dateFilterMode === 'custom_range') {
+        if (!startDate && !endDate) return memberPayments.length > 0;
+        return memberPayments.some(p => {
+          if (startDate && !endDate) return p.date >= startDate;
+          if (!startDate && endDate) return p.date <= endDate;
+          return p.date >= startDate && p.date <= endDate;
+        });
+      }
+    } else {
+      // Check-in date activity filtering
+      const memberLogs = attendance.filter(a => a.memberId === m.id);
+      if (dateFilterMode === 'this_month') {
+        const currentMonth = new Date().toISOString().substring(0, 7);
+        return memberLogs.some(a => a.date.substring(0, 7) === currentMonth);
+      }
+
+      if (dateFilterMode === 'select_month') {
+        return memberLogs.some(a => a.date.substring(0, 7) === selectedMonth);
+      }
+
+      if (dateFilterMode === 'custom_range') {
+        if (!startDate && !endDate) return memberLogs.length > 0;
+        return memberLogs.some(a => {
+          if (startDate && !endDate) return a.date >= startDate;
+          if (!startDate && endDate) return a.date <= endDate;
+          return a.date >= startDate && a.date <= endDate;
+        });
+      }
     }
 
     return true;
   });
+
+  // Filter selected member's attendance records by date
+  const selectedMemberAttendance = selectedMember ? attendance.filter(a => a.memberId === selectedMember.id) : [];
+
+  const filteredSelectedMemberAttendance = selectedMemberAttendance.filter(a => {
+    if (athleteAttFilterMode === 'all') return true;
+
+    if (athleteAttFilterMode === 'this_month') {
+      const currentMonth = new Date().toISOString().substring(0, 7);
+      return a.date.substring(0, 7) === currentMonth;
+    }
+
+    if (athleteAttFilterMode === 'select_month') {
+      return a.date.substring(0, 7) === athleteAttSelectedMonth;
+    }
+
+    if (athleteAttFilterMode === 'custom_range') {
+      if (!athleteAttStartDate && !athleteAttEndDate) return true;
+      if (athleteAttStartDate && !athleteAttEndDate) return a.date >= athleteAttStartDate;
+      if (!athleteAttStartDate && athleteAttEndDate) return a.date <= athleteAttEndDate;
+      return a.date >= athleteAttStartDate && a.date <= athleteAttEndDate;
+    }
+
+    return true;
+  }).sort((a, b) => {
+    const dComp = b.date.localeCompare(a.date);
+    if (dComp !== 0) return dComp;
+    return b.checkInTime.localeCompare(a.checkInTime);
+  });
+
+  // Filter selected member's payment and dues ledger records by date
+  const selectedMemberPayments = selectedMember ? payments.filter(p => p.memberId === selectedMember.id) : [];
+  const totalAdvanceCreditRecorded = selectedMemberPayments.reduce((s, p) => s + (p.extraAmount || 0), 0);
+  const totalDuesRecorded = selectedMemberPayments.reduce((s, p) => s + (p.dueAmount || 0), 0);
+
+  const filteredSelectedMemberPayments = selectedMemberPayments.filter(p => {
+    if (athletePayFilterMode === 'all') return true;
+
+    if (athletePayFilterMode === 'this_month') {
+      const currentMonth = new Date().toISOString().substring(0, 7);
+      return p.date.substring(0, 7) === currentMonth;
+    }
+
+    if (athletePayFilterMode === 'select_month') {
+      return p.date.substring(0, 7) === athletePaySelectedMonth;
+    }
+
+    if (athletePayFilterMode === 'custom_range') {
+      if (!athletePayStartDate && !athletePayEndDate) return true;
+      if (athletePayStartDate && !athletePayEndDate) return p.date >= athletePayStartDate;
+      if (!athletePayStartDate && athletePayEndDate) return p.date <= athletePayStartDate;
+      return p.date >= athletePayStartDate && p.date <= athletePayEndDate;
+    }
+
+    return true;
+  }).sort((a, b) => b.date.localeCompare(a.date));
 
   // Final Filtered members list
   const filteredMembers = dateFilteredMembers.filter(m => {
@@ -322,6 +539,12 @@ export default function MembersList({
     exportMembersToCSV(filteredMembers, plans, `athletes_${dateFilterMode}`);
   };
 
+  // Members with 1 day remaining or due today
+  const expiringOneDayMembers = members.filter(m => {
+    const period = getSubscriptionPeriod(m);
+    return period.daysRemaining === 1 || period.daysRemaining === 0;
+  });
+
   return (
     <div className="space-y-6" id="members-list-container">
       {/* Date Range & Monthly Tracking Control Bar */}
@@ -329,22 +552,33 @@ export default function MembersList({
         <div className="flex items-center gap-2">
           <Calendar className="w-5 h-5 text-lime-400 shrink-0" />
           <div>
-            <h4 className="text-white font-bold text-sm">Athletes Joining & Activity Date Range</h4>
-            <p className="text-slate-400 text-xs">Track active members and new athlete registrations by month or custom range</p>
+            <h4 className="text-white font-bold text-sm">Athletes Activity & Financial Ledger Filter</h4>
+            <p className="text-slate-400 text-xs">Filter members by registration date, date-wise check-ins, or fee payment dates</p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5" id="members-date-filter-controls">
+          <select
+            value={dateFilterType}
+            onChange={(e) => setDateFilterType(e.target.value as any)}
+            className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-2.5 py-2 text-xs text-lime-400 font-semibold focus:outline-none cursor-pointer"
+            id="members-date-type-select"
+          >
+            <option value="join_date">📅 Filter by Joining Date</option>
+            <option value="checkin_date">⏱️ Filter by Check-In Activity Date</option>
+            <option value="payment_date">💵 Filter by Fee / Payment Date</option>
+          </select>
+
           <select
             value={dateFilterMode}
             onChange={(e) => setDateFilterMode(e.target.value as any)}
             className="bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2 text-xs text-white focus:outline-none cursor-pointer"
             id="members-date-mode-select"
           >
-            <option value="all">All Joined Athletes ({members.length})</option>
-            <option value="this_month">Joined This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
-            <option value="select_month">Joined Select Month...</option>
-            <option value="custom_range">Joined Custom Range...</option>
+            <option value="all">All Dates ({members.length})</option>
+            <option value="this_month">This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
+            <option value="select_month">Select Month...</option>
+            <option value="custom_range">Custom Date Range...</option>
           </select>
 
           {dateFilterMode === 'select_month' && (
@@ -387,6 +621,49 @@ export default function MembersList({
           </button>
         </div>
       </div>
+
+      {/* 📱 WhatsApp Expiry Notification Banner (1 Day Remaining / Due) */}
+      {expiringOneDayMembers.length > 0 && (
+        <div className="bg-gradient-to-r from-emerald-950/40 via-[#161B22] to-emerald-950/20 border border-emerald-500/30 rounded-2xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 shadow-lg shadow-emerald-950/20" id="whatsapp-expiring-banner">
+          <div className="flex items-center gap-3">
+            <div className="bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/30 text-emerald-400 shrink-0">
+              <MessageCircle className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-white font-bold text-sm">Impending Plan Expirations ({expiringOneDayMembers.length} Athlete{expiringOneDayMembers.length > 1 ? 's' : ''})</h4>
+                <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
+                  1 Day Left / Due
+                </span>
+              </div>
+              <p className="text-slate-400 text-xs mt-0.5">
+                Send instant WhatsApp messages directly to their mobile number with pre-filled package details & fee renewal options.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto py-1">
+            {expiringOneDayMembers.slice(0, 3).map((expMember) => (
+              <button
+                key={expMember.id}
+                onClick={() => handleOpenWhatsAppModal(expMember)}
+                className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:border-emerald-400 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0 cursor-pointer"
+                title={`Send WhatsApp reminder to ${expMember.name}`}
+                id={`whatsapp-banner-btn-${expMember.id}`}
+              >
+                <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Remind {expMember.name.split(' ')[0]}</span>
+              </button>
+            ))}
+            {expiringOneDayMembers.length > 3 && (
+              <span className="text-xs text-slate-400 font-mono pl-1">
+                +{expiringOneDayMembers.length - 3} more
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Search and Filters Header */}
       <div className="flex flex-col lg:flex-row gap-4 justify-between items-stretch lg:items-center bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="members-header-panel">
         <div className="flex-1 relative" id="search-input-wrapper">
@@ -515,10 +792,31 @@ export default function MembersList({
                       </td>
                       <td className="py-3.5 px-5 text-right">
                         <div className="flex items-center justify-end gap-1.5" onClick={e => e.stopPropagation()}>
+                          {m.phone && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenWhatsAppModal(m);
+                              }}
+                              title="Send WhatsApp Package Reminder"
+                              className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white transition-colors cursor-pointer"
+                              id={`quick-whatsapp-${m.id}`}
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setSelectedMember(m)}
+                            title="View Date-wise Attendance Logs"
+                            className="p-1.5 rounded-lg bg-purple-500/10 text-purple-400 hover:bg-purple-500 hover:text-white transition-colors cursor-pointer"
+                            id={`view-att-logs-${m.id}`}
+                          >
+                            <Clock className="w-3.5 h-3.5" />
+                          </button>
                           <button
                              onClick={(e) => handleCheckInClick(m.id, e)}
-                             title="Check-In Athlete"
-                             className="p-1.5 rounded-lg bg-purple-500/10 text-purple-400 hover:bg-purple-500 hover:text-white transition-colors cursor-pointer"
+                             title="Quick Check-In Today"
+                             className="p-1.5 rounded-lg bg-lime-400/10 text-lime-400 hover:bg-lime-400 hover:text-black transition-colors cursor-pointer"
                              id={`quick-checkin-${m.id}`}
                           >
                             <Calendar className="w-3.5 h-3.5" />
@@ -675,9 +973,9 @@ export default function MembersList({
                 {/* History Analytics (Attendance & Payments counts) */}
                 <div className="border-t border-slate-800 pt-3.5 grid grid-cols-2 gap-3" id="detail-history-badges">
                   <div className="bg-slate-900/40 border border-slate-800/80 rounded-xl p-2.5 text-center">
-                    <span className="block text-[10px] text-slate-500 uppercase font-bold">Gym Check-Ins</span>
+                    <span className="block text-[10px] text-slate-500 uppercase font-bold">Total Check-Ins</span>
                     <span className="block font-mono font-bold text-lg text-white mt-1">
-                      {attendance.filter(a => a.memberId === selectedMember.id).length}
+                      {selectedMemberAttendance.length}
                     </span>
                   </div>
                   <div className="bg-slate-900/40 border border-slate-800/80 rounded-xl p-2.5 text-center">
@@ -687,24 +985,318 @@ export default function MembersList({
                     </span>
                   </div>
                 </div>
+
+                {/* 💵 Date-Wise Payment & Dues Ledger Tracker */}
+                <div className="bg-[#1C2128] border border-slate-800 rounded-2xl p-4 space-y-3.5" id="member-payment-history-card">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CreditCard className="w-4 h-4 text-emerald-400" />
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">Payment & Dues Ledger Tracker</span>
+                    </div>
+                    <span className="text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
+                      {filteredSelectedMemberPayments.length} Records
+                    </span>
+                  </div>
+
+                  {/* Summary Pills for Athlete's Ledger */}
+                  <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
+                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-2">
+                      <span className="text-slate-500 block uppercase font-bold text-[9px] truncate">Total Paid</span>
+                      <strong className="text-emerald-400 text-xs font-mono">
+                        {currSymbol} {filteredSelectedMemberPayments.reduce((s, p) => s + p.amount, 0).toLocaleString()}
+                      </strong>
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-2">
+                      <span className="text-slate-500 block uppercase font-bold text-[9px] truncate" title="Total Due Left Record">Total Due Left</span>
+                      <strong className={`text-xs font-mono ${(totalDuesRecorded > 0 ? totalDuesRecorded : (selectedMember.dueBalance || 0)) > 0 ? 'text-amber-400 font-bold' : 'text-slate-400'}`}>
+                        {currSymbol} {(totalDuesRecorded > 0 ? totalDuesRecorded : (selectedMember.dueBalance || 0)).toLocaleString()}
+                      </strong>
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-2">
+                      <span className="text-slate-500 block uppercase font-bold text-[9px] truncate" title="Total Advance Credit Record">Total Advance Credit</span>
+                      <strong className={`text-xs font-mono ${(totalAdvanceCreditRecorded > 0 ? totalAdvanceCreditRecorded : (selectedMember.advanceBalance || 0)) > 0 ? 'text-lime-400 font-bold' : 'text-slate-400'}`}>
+                        {currSymbol} {(totalAdvanceCreditRecorded > 0 ? totalAdvanceCreditRecorded : (selectedMember.advanceBalance || 0)).toLocaleString()}
+                      </strong>
+                    </div>
+                  </div>
+
+                  {/* Filter Controls for Payment Dates */}
+                  <div className="space-y-2 bg-slate-900/80 border border-slate-800 rounded-xl p-2.5" id="athlete-pay-filter-box">
+                    <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                      <Filter className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Filter Payment Dates:</span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={athletePayFilterMode}
+                        onChange={(e: any) => setAthletePayFilterMode(e.target.value)}
+                        className="bg-slate-950 border border-slate-800 focus:border-emerald-400 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none cursor-pointer flex-1"
+                        id="athlete-pay-mode-select"
+                      >
+                        <option value="all">All Payments ({selectedMemberPayments.length})</option>
+                        <option value="this_month">This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
+                        <option value="select_month">Select Month...</option>
+                        <option value="custom_range">Custom Range...</option>
+                      </select>
+
+                      {athletePayFilterMode === 'select_month' && (
+                        <input
+                          type="month"
+                          value={athletePaySelectedMonth}
+                          onChange={(e) => setAthletePaySelectedMonth(e.target.value)}
+                          className="bg-slate-950 border border-slate-800 text-white rounded-lg px-2 py-1 text-[11px] font-mono"
+                        />
+                      )}
+
+                      {athletePayFilterMode === 'custom_range' && (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="date"
+                            value={athletePayStartDate}
+                            onChange={(e) => setAthletePayStartDate(e.target.value)}
+                            className="bg-slate-950 border border-slate-800 text-white rounded-lg px-1.5 py-0.5 text-[10px] font-mono"
+                          />
+                          <span className="text-slate-500 text-[10px]">to</span>
+                          <input
+                            type="date"
+                            value={athletePayEndDate}
+                            onChange={(e) => setAthletePayEndDate(e.target.value)}
+                            className="bg-slate-950 border border-slate-800 text-white rounded-lg px-1.5 py-0.5 text-[10px] font-mono"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Payment & Dues Log Records List */}
+                  <div className="max-h-56 overflow-y-auto space-y-2 pr-1" id="athlete-payment-records-list">
+                    {filteredSelectedMemberPayments.map((pay) => {
+                      const payDate = new Date(pay.date + 'T00:00:00');
+                      const formattedDate = isNaN(payDate.getTime()) ? pay.date : payDate.toLocaleDateString(undefined, {
+                        weekday: 'short',
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric'
+                      });
+                      const planObj = plans.find(p => p.id === pay.planId);
+
+                      return (
+                        <div key={pay.id} className="bg-slate-900/90 border border-slate-800/90 hover:border-slate-700 rounded-xl p-2.5 space-y-1.5 text-xs transition-colors">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="text-white font-bold font-mono text-[11px]">{formattedDate}</span>
+                              <span className="text-[10px] text-slate-400 bg-slate-800 px-1.5 py-0.2 rounded font-sans">
+                                {pay.paymentMethod || 'Cash'}
+                              </span>
+                            </div>
+                            <span className="font-mono font-extrabold text-emerald-400 text-sm">
+                              Rs. {pay.amount.toLocaleString()}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-slate-400">
+                              Package Rate: <strong className="text-slate-200">Rs. {(pay.planPrice || planObj?.price || pay.amount).toLocaleString()}</strong>
+                              {planObj && ` (${planObj.name})`}
+                            </span>
+                          </div>
+
+                          {(pay.dueAmount || 0) > 0 ? (
+                            <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-1.5 text-[10px] text-amber-300 font-bold flex justify-between">
+                              <span>⚠️ Remaining Unpaid Due Logged:</span>
+                              <span>Rs. {pay.dueAmount?.toLocaleString()}</span>
+                            </div>
+                          ) : (pay.extraAmount || 0) > 0 ? (
+                            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-1.5 text-[10px] text-emerald-300 font-bold flex justify-between">
+                              <span>✨ Advance Credit Recorded:</span>
+                              <span>Rs. {pay.extraAmount?.toLocaleString()}</span>
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-lime-400/90 font-medium flex items-center gap-1">
+                              <span>✅ Paid in Full (Zero Balance)</span>
+                            </div>
+                          )}
+
+                          {pay.notes && (
+                            <p className="text-[10px] text-slate-500 italic border-t border-slate-800/60 pt-1">
+                              Note: {pay.notes}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {filteredSelectedMemberPayments.length === 0 && (
+                      <div className="p-3 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
+                        No fee payments logged for selected date range.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 📅 Date-Wise Attendance Log & Filter Box */}
+                <div className="bg-[#1C2128] border border-slate-800 rounded-2xl p-4 space-y-3.5" id="member-attendance-history-card">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-purple-400" />
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">Attendance Date Tracker</span>
+                    </div>
+                    <span className="text-[10px] font-mono font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30 px-2.5 py-0.5 rounded-full">
+                      {filteredSelectedMemberAttendance.length} Logs
+                    </span>
+                  </div>
+
+                  {/* Filter Controls */}
+                  <div className="space-y-2 bg-slate-900/80 border border-slate-800 rounded-xl p-2.5" id="athlete-att-filter-box">
+                    <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                      <Filter className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Filter Check-in Dates:</span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={athleteAttFilterMode}
+                        onChange={(e: any) => setAthleteAttFilterMode(e.target.value)}
+                        className="bg-slate-950 border border-slate-800 focus:border-purple-400 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none cursor-pointer flex-1"
+                        id="athlete-att-mode-select"
+                      >
+                        <option value="all">All Check-Ins ({selectedMemberAttendance.length})</option>
+                        <option value="this_month">This Month ({new Date().toLocaleDateString(undefined, { month: 'short', year: 'numeric' })})</option>
+                        <option value="select_month">Select Month...</option>
+                        <option value="custom_range">Custom Range...</option>
+                      </select>
+
+                      {athleteAttFilterMode === 'select_month' && (
+                        <input
+                          type="month"
+                          value={athleteAttSelectedMonth}
+                          onChange={(e) => setAthleteAttSelectedMonth(e.target.value)}
+                          className="bg-slate-950 border border-slate-800 text-white rounded-lg px-2 py-1 text-[11px] font-mono"
+                        />
+                      )}
+
+                      {athleteAttFilterMode === 'custom_range' && (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="date"
+                            value={athleteAttStartDate}
+                            onChange={(e) => setAthleteAttStartDate(e.target.value)}
+                            className="bg-slate-950 border border-slate-800 text-white rounded-lg px-1.5 py-0.5 text-[10px] font-mono"
+                          />
+                          <span className="text-slate-500 text-[10px]">to</span>
+                          <input
+                            type="date"
+                            value={athleteAttEndDate}
+                            onChange={(e) => setAthleteAttEndDate(e.target.value)}
+                            className="bg-slate-950 border border-slate-800 text-white rounded-lg px-1.5 py-0.5 text-[10px] font-mono"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Attendance Log Records Table */}
+                  <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1" id="athlete-checkin-records-list">
+                    {filteredSelectedMemberAttendance.map((rec) => {
+                      const recDate = new Date(rec.date + 'T00:00:00');
+                      const formattedDate = isNaN(recDate.getTime()) ? rec.date : recDate.toLocaleDateString(undefined, {
+                        weekday: 'short',
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric'
+                      });
+                      return (
+                        <div key={rec.id} className="bg-slate-900/90 border border-slate-800/90 hover:border-slate-700 rounded-xl p-2 flex items-center justify-between text-xs transition-colors">
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="text-white font-bold font-mono text-[11px]">{formattedDate}</span>
+                              <span className="text-[10px] text-purple-300 bg-purple-500/15 border border-purple-500/20 px-1.5 py-0.2 rounded font-mono">
+                                ⏰ {rec.checkInTime}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-slate-500 block">Verified Floor Entry</span>
+                          </div>
+
+                          {onDeleteAttendance && (
+                            <button
+                              onClick={() => {
+                                if (window.confirm(`Delete check-in record for ${rec.date} at ${rec.checkInTime}?`)) {
+                                  onDeleteAttendance(rec.id);
+                                }
+                              }}
+                              title="Delete attendance record"
+                              className="text-slate-500 hover:text-red-400 p-1 rounded hover:bg-red-500/10 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {filteredSelectedMemberAttendance.length === 0 && (
+                      <div className="p-3 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
+                        No check-in logs found for selected date range.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      onClick={() => {
+                        setCustomCheckInMemberId(selectedMember.id);
+                        setCustomCheckInDate(new Date().toISOString().split('T')[0]);
+                        setIsCustomCheckInModalOpen(true);
+                      }}
+                      className="flex-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-bold py-2 px-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <PlusCircle className="w-3.5 h-3.5" />
+                      Log Past Check-In Date
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        exportAttendanceToCSV(filteredSelectedMemberAttendance, [selectedMember], `${selectedMember.name.replace(/\s+/g, '_')}_attendance`);
+                      }}
+                      title="Export Athlete Check-in History CSV"
+                      className="bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 p-2 rounded-xl transition-colors cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="pt-4 border-t border-slate-800 flex gap-2" id="detail-action-footer">
-              <button
-                onClick={(e) => startEdit(selectedMember, e)}
-                className="flex-1 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-white text-xs font-semibold py-2 rounded-xl transition-all cursor-pointer"
-                id="edit-detail-btn"
-              >
-                Modify Info
-              </button>
-              <button
-                onClick={() => setIsPaymentOpen(selectedMember)}
-                className="flex-1 bg-lime-400/10 border border-lime-400/20 text-lime-400 hover:bg-lime-400 hover:text-black text-xs font-semibold py-2 rounded-xl transition-all cursor-pointer"
-                id="pay-detail-btn"
-              >
-                Record Payment
-              </button>
+            <div className="pt-4 border-t border-slate-800 flex flex-col gap-2" id="detail-action-footer">
+              {selectedMember.phone && (
+                <button
+                  onClick={() => handleOpenWhatsAppModal(selectedMember)}
+                  className="w-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 text-xs font-bold py-2.5 rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+                  id="whatsapp-detail-btn"
+                >
+                  <MessageCircle className="w-4 h-4 text-emerald-400" />
+                  <span>Send WhatsApp Expiry Reminder</span>
+                </button>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={(e) => startEdit(selectedMember, e)}
+                  className="flex-1 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-white text-xs font-semibold py-2 rounded-xl transition-all cursor-pointer"
+                  id="edit-detail-btn"
+                >
+                  Modify Info
+                </button>
+                <button
+                  onClick={() => setIsPaymentOpen(selectedMember)}
+                  className="flex-1 bg-lime-400/10 border border-lime-400/20 text-lime-400 hover:bg-lime-400 hover:text-black text-xs font-semibold py-2 rounded-xl transition-all cursor-pointer"
+                  id="pay-detail-btn"
+                >
+                  Record Payment
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -917,15 +1509,87 @@ export default function MembersList({
             </div>
 
             <form onSubmit={handlePaymentSubmit} className="p-5 space-y-4" id="payment-form">
+              {/* Plan Selection */}
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Allotted Plan / Package</label>
+                <select
+                  value={selectedPaymentPlanId}
+                  onChange={(e) => setSelectedPaymentPlanId(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none cursor-pointer"
+                >
+                  {plans.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — Rs. {p.price.toLocaleString()} ({p.durationMonths} month{p.durationMonths > 1 ? 's' : ''})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Financial Calculation Breakdown Card */}
+              {(() => {
+                const targetPlan = plans.find(p => p.id === (selectedPaymentPlanId || isPaymentOpen.planId)) || plans[0];
+                const planPrice = targetPlan ? targetPlan.price : 0;
+                const prevDue = isPaymentOpen.dueBalance || 0;
+                const prevAdvance = isPaymentOpen.advanceBalance || 0;
+                const totalTarget = Math.max(0, (planPrice + prevDue) - prevAdvance);
+                const currentPaid = Number(paymentAmount) || 0;
+                const netBalance = currentPaid - totalTarget;
+
+                return (
+                  <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-2 text-xs font-mono">
+                    <div className="flex justify-between text-slate-400">
+                      <span>Plan Rate ({targetPlan?.name || 'Package'}):</span>
+                      <strong className="text-white">Rs. {planPrice.toLocaleString()}</strong>
+                    </div>
+                    {prevDue > 0 && (
+                      <div className="flex justify-between text-amber-400">
+                        <span>Previous Unpaid Dues:</span>
+                        <strong>+ Rs. {prevDue.toLocaleString()}</strong>
+                      </div>
+                    )}
+                    {prevAdvance > 0 && (
+                      <div className="flex justify-between text-emerald-400">
+                        <span>Previous Advance Credit:</span>
+                        <strong>- Rs. {prevAdvance.toLocaleString()}</strong>
+                      </div>
+                    )}
+                    <div className="flex justify-between border-t border-slate-800 pt-1.5 font-bold text-white">
+                      <span>Total Expected Today:</span>
+                      <span className="text-lime-400 font-sans font-extrabold text-sm">Rs. {totalTarget.toLocaleString()}</span>
+                    </div>
+
+                    {paymentAmount !== '' && (
+                      <div className="border-t border-slate-800 pt-2 text-[11px]">
+                        {netBalance < 0 ? (
+                          <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-2 text-amber-300 flex justify-between font-sans">
+                            <span>⚠️ Remaining Unpaid Due:</span>
+                            <strong className="font-bold">Rs. {Math.abs(netBalance).toLocaleString()}</strong>
+                          </div>
+                        ) : netBalance > 0 ? (
+                          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-2 text-emerald-300 flex justify-between font-sans">
+                            <span>✨ Extra Payment / Advance:</span>
+                            <strong className="font-bold">Rs. {netBalance.toLocaleString()}</strong>
+                          </div>
+                        ) : (
+                          <div className="bg-lime-500/10 border border-lime-500/20 rounded-xl p-2 text-lime-300 flex justify-between font-sans font-bold">
+                            <span>✅ Paid in Full (Zero Balance)</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div id="payment-field-amount">
-                <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Amount Paid (PKR) *</label>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Amount Paid Today (PKR) *</label>
                 <input
                   type="number"
                   required
-                  placeholder="e.g. 49"
+                  placeholder="e.g. 5000"
                   value={paymentAmount}
                   onChange={(e) => setPaymentAmount(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none"
+                  className="w-full bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none font-bold"
                 />
               </div>
 
@@ -947,7 +1611,7 @@ export default function MembersList({
                 <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Reference / Notes</label>
                 <input
                   type="text"
-                  placeholder="e.g. Transaction #9A24D, cash bag ID..."
+                  placeholder="e.g. Transaction ID, receipt #..."
                   value={paymentNotes}
                   onChange={(e) => setPaymentNotes(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-800 focus:border-lime-400 rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none"
@@ -965,13 +1629,274 @@ export default function MembersList({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-lime-400 hover:bg-lime-500 text-sm font-bold text-black cursor-pointer"
+                  className="px-5 py-2 rounded-xl bg-lime-400 hover:bg-lime-500 text-sm font-bold text-black cursor-pointer shadow-md shadow-lime-400/10"
                   id="save-payment-btn"
                 >
-                  Log Payment
+                  Confirm & Log Payment
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Log Attendance on Custom Date Modal */}
+      {isCustomCheckInModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" id="custom-checkin-modal">
+          <div className="bg-[#161B22] border border-slate-800 rounded-3xl max-w-md w-full overflow-hidden shadow-2xl p-5 space-y-4" id="custom-checkin-card">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-3" id="custom-checkin-header">
+              <div>
+                <h3 className="text-white font-bold text-base font-display">Log Attendance on Custom Date</h3>
+                <p className="text-slate-400 text-xs">Record check-in date & time for athlete</p>
+              </div>
+              <button 
+                onClick={() => setIsCustomCheckInModalOpen(false)} 
+                className="text-slate-400 hover:text-white cursor-pointer"
+                id="close-custom-checkin-btn"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form 
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (onCustomCheckIn && customCheckInMemberId) {
+                  onCustomCheckIn(customCheckInMemberId, customCheckInDate, customCheckInTime);
+                  alert(`Successfully logged check-in for ${customCheckInDate} at ${customCheckInTime}!`);
+                  setIsCustomCheckInModalOpen(false);
+                } else {
+                  onCheckIn(customCheckInMemberId);
+                  setIsCustomCheckInModalOpen(false);
+                }
+              }} 
+              className="space-y-3.5"
+              id="custom-checkin-form"
+            >
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Target Athlete</label>
+                <select
+                  value={customCheckInMemberId}
+                  onChange={(e) => setCustomCheckInMemberId(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 focus:border-purple-400 rounded-xl px-3 py-2 text-white text-xs focus:outline-none cursor-pointer"
+                  id="custom-checkin-athlete-select"
+                >
+                  {members.map(m => (
+                    <option key={m.id} value={m.id}>{m.name} (Phone: {m.phone})</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Check-In Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={customCheckInDate}
+                    onChange={(e) => setCustomCheckInDate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-purple-400 rounded-xl px-3 py-2 text-white text-xs font-mono focus:outline-none"
+                    id="custom-checkin-date-input"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Check-In Time *</label>
+                  <input
+                    type="time"
+                    required
+                    value={customCheckInTime}
+                    onChange={(e) => setCustomCheckInTime(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-purple-400 rounded-xl px-3 py-2 text-white text-xs font-mono focus:outline-none"
+                    id="custom-checkin-time-input"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 flex justify-end gap-2" id="custom-checkin-footer">
+                <button
+                  type="button"
+                  onClick={() => setIsCustomCheckInModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-xs font-semibold text-slate-300 cursor-pointer"
+                  id="cancel-custom-checkin-btn"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-purple-500 hover:bg-purple-600 text-white text-xs font-bold transition-all shadow-md cursor-pointer"
+                  id="save-custom-checkin-btn"
+                >
+                  Save Attendance Date
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 📱 WhatsApp Expiry Message Customizer & Sender Modal */}
+      {isWhatsAppModalOpen && whatsAppMember && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" id="whatsapp-preview-modal">
+          <div className="bg-[#161B22] border border-slate-800 rounded-3xl max-w-lg w-full overflow-hidden shadow-2xl space-y-0" id="whatsapp-modal-container">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/50">
+              <div className="flex items-center gap-2.5 text-emerald-400">
+                <MessageCircle className="w-5 h-5" />
+                <h3 className="text-base font-bold font-display text-white">WhatsApp Expiry Reminder</h3>
+              </div>
+              <button
+                onClick={() => setIsWhatsAppModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+                id="close-whatsapp-modal-btn"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 space-y-4">
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5 text-xs space-y-1">
+                <div className="flex justify-between text-slate-300">
+                  <span>Recipient Athlete:</span>
+                  <strong className="text-white font-semibold">{whatsAppMember.name}</strong>
+                </div>
+                <div className="flex justify-between text-slate-300">
+                  <span>Phone Number:</span>
+                  <span className="text-emerald-400 font-mono font-bold">{formatPhoneNumberForWhatsApp(whatsAppMember.phone, gymCountryCode)}</span>
+                </div>
+                <div className="flex justify-between text-slate-300">
+                  <span>Country Prefix:</span>
+                  <span className="text-slate-400 font-mono">{gymCountryCode}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
+                  Message Text Preview (Editable before launching WhatsApp)
+                </label>
+                <textarea
+                  rows={8}
+                  value={whatsAppCustomMessage}
+                  onChange={(e) => setWhatsAppCustomMessage(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-400 rounded-2xl p-4 text-xs font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-400 leading-relaxed"
+                  id="whatsapp-text-editor"
+                />
+              </div>
+
+              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-[11px] text-emerald-300 leading-normal flex items-start gap-2">
+                <Info className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Desktop .exe compatibility:</strong> Click <strong>Direct API Link</strong> or <strong>Web WhatsApp</strong>. If your desktop container blocks opening popups, click <strong>Copy Web Link</strong> below and paste into Chrome / Edge!
+                </span>
+              </div>
+
+              {/* Direct Link Copy Bar */}
+              <div className="space-y-1">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Direct WhatsApp URL</label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    readOnly
+                    value={getWhatsAppDirectUrl(whatsAppMember.phone, gymCountryCode, whatsAppCustomMessage, 'api')}
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-[11px] font-mono text-emerald-400 focus:outline-none truncate"
+                    id="whatsapp-direct-url-input"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const directUrl = getWhatsAppDirectUrl(whatsAppMember.phone, gymCountryCode, whatsAppCustomMessage, 'api');
+                      if (navigator.clipboard) {
+                        navigator.clipboard.writeText(directUrl);
+                        setIsCopiedUrl(true);
+                        setTimeout(() => setIsCopiedUrl(false), 2500);
+                      }
+                    }}
+                    className="bg-slate-900 hover:bg-slate-800 border border-slate-700 text-emerald-400 text-xs font-semibold px-3 py-1.5 rounded-xl transition-all cursor-pointer flex items-center gap-1 shrink-0"
+                    id="copy-whatsapp-url-btn"
+                  >
+                    {isCopiedUrl ? <Check className="w-3.5 h-3.5 text-lime-400" /> : <Copy className="w-3.5 h-3.5 text-emerald-400" />}
+                    <span>{isCopiedUrl ? 'Copied URL!' : 'Copy URL'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex flex-col space-y-2 p-6 border-t border-slate-800 bg-slate-900/50">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    openWhatsApp(whatsAppMember.phone, whatsAppCustomMessage, 'app', gymCountryCode);
+                  }}
+                  className="bg-emerald-500 hover:bg-emerald-600 text-black text-xs font-bold py-2.5 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/10"
+                  id="launch-app-whatsapp-btn"
+                >
+                  <Send className="w-4 h-4 text-black" />
+                  <span>WhatsApp Desktop App (.exe)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    openWhatsApp(whatsAppMember.phone, whatsAppCustomMessage, 'api', gymCountryCode);
+                  }}
+                  className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-400 text-xs font-bold py-2.5 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  id="launch-api-whatsapp-btn"
+                >
+                  <Globe className="w-4 h-4 text-emerald-400" />
+                  <span>Direct Web API</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    openWhatsApp(whatsAppMember.phone, whatsAppCustomMessage, 'web', gymCountryCode);
+                  }}
+                  className="bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 text-xs font-semibold py-2 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1 text-center"
+                  id="launch-web-whatsapp-btn"
+                >
+                  <span>Web WhatsApp</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cleanPhone = formatPhoneNumberForWhatsApp(whatsAppMember.phone, gymCountryCode);
+                    const linkUrl = `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(whatsAppCustomMessage)}`;
+                    if (navigator.clipboard) {
+                      navigator.clipboard.writeText(linkUrl);
+                      setIsCopiedUrl(true);
+                      setTimeout(() => setIsCopiedUrl(false), 2500);
+                    }
+                  }}
+                  className="bg-slate-900 hover:bg-slate-850 border border-slate-800 text-emerald-400 text-xs font-semibold py-2 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1 text-center"
+                  id="copy-whatsapp-link-btn"
+                >
+                  {isCopiedUrl ? <Check className="w-3.5 h-3.5 text-lime-400" /> : <Copy className="w-3.5 h-3.5 text-emerald-400" />}
+                  <span>{isCopiedUrl ? 'Copied Link!' : 'Copy Web Link'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (navigator.clipboard) {
+                      const fullCopyText = `Phone: ${formatPhoneNumberForWhatsApp(whatsAppMember.phone, gymCountryCode)}\n\n${whatsAppCustomMessage}`;
+                      navigator.clipboard.writeText(fullCopyText);
+                      setIsCopiedWhatsApp(true);
+                      setTimeout(() => setIsCopiedWhatsApp(false), 2500);
+                    }
+                  }}
+                  className="bg-slate-900 hover:bg-slate-850 border border-slate-800 text-lime-400 text-xs font-semibold py-2 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  id="copy-whatsapp-msg-btn"
+                >
+                  {isCopiedWhatsApp ? <Check className="w-3.5 h-3.5 text-lime-400" /> : <Copy className="w-3.5 h-3.5 text-lime-400" />}
+                  <span>{isCopiedWhatsApp ? 'Copied Text!' : 'Copy Text'}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

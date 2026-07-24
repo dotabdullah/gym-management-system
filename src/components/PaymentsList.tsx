@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Payment, Member, Plan } from '../types';
 import { exportPaymentsToCSV } from '../lib/csvHelper';
+import { getCurrencySymbol } from '../lib/whatsappHelper';
 import { 
   DollarSign, 
   Search, 
@@ -23,6 +24,7 @@ interface PaymentsListProps {
   gymName?: string;
   gymPhone?: string;
   gymAddress?: string;
+  gymCurrency?: string;
 }
 
 export default function PaymentsList({ 
@@ -31,8 +33,10 @@ export default function PaymentsList({
   plans,
   gymName,
   gymPhone,
-  gymAddress
+  gymAddress,
+  gymCurrency = 'PKR'
 }: PaymentsListProps) {
+  const currSymbol = getCurrencySymbol(gymCurrency);
   const [searchTerm, setSearchTerm] = useState('');
   const [methodFilter, setMethodFilter] = useState('all');
   const [selectedReceipt, setSelectedReceipt] = useState<Payment | null>(null);
@@ -74,6 +78,10 @@ export default function PaymentsList({
   const totalRevenue = dateFilteredPayments.reduce((sum, p) => sum + p.amount, 0);
   const averageTicket = dateFilteredPayments.length > 0 ? Math.round(totalRevenue / dateFilteredPayments.length) : 0;
   
+  // Dues & Advance totals in filtered range
+  const totalRecordedDues = dateFilteredPayments.reduce((sum, p) => sum + (p.dueAmount || 0), 0);
+  const totalRecordedAdvance = dateFilteredPayments.reduce((sum, p) => sum + (p.extraAmount || 0), 0);
+
   // Method breakdowns
   const cashTotal = dateFilteredPayments.filter(p => p.paymentMethod === 'Cash').reduce((sum, p) => sum + p.amount, 0);
   const cardTotal = dateFilteredPayments.filter(p => p.paymentMethod === 'Card').reduce((sum, p) => sum + p.amount, 0);
@@ -98,6 +106,47 @@ export default function PaymentsList({
   // Generate Receipt Trigger
   const handlePrintReceipt = () => {
     window.print();
+  };
+
+  // Download Individual Receipt File
+  const handleDownloadReceipt = (payment: Payment) => {
+    const member = members.find(m => m.id === payment.memberId);
+    const plan = plans.find(p => p.id === payment.planId);
+    const memberName = member ? member.name : 'Gym Athlete';
+    const planName = plan ? plan.name : 'Gym Membership';
+    const txnId = `TXN-${payment.id.toUpperCase().substring(0, 8)}`;
+    const dateStr = payment.date || new Date().toISOString().split('T')[0];
+
+    const content = `==================================================
+                 ${gymName || 'GYM STATION'}
+          RECEIPT / INVOICE OFFICIAL DOCUMENT
+==================================================
+Transaction Ref: ${txnId}
+Date:            ${dateStr}
+Member / Athlete:${memberName}
+Phone:           ${member?.phone || 'N/A'}
+Payment Method:  ${payment.paymentMethod || 'Cash'}
+--------------------------------------------------
+DESCRIPTION                                 AMOUNT
+--------------------------------------------------
+${planName.padEnd(35, ' ')} ${currSymbol} ${(payment.planPrice || plan?.price || payment.amount).toLocaleString()}
+--------------------------------------------------
+Amount Paid Today:               ${currSymbol} ${payment.amount.toLocaleString()}
+${(payment.dueAmount || 0) > 0 ? `Unpaid Due Logged:             ${currSymbol} ${payment.dueAmount?.toLocaleString()}\n` : ''}${(payment.extraAmount || 0) > 0 ? `Extra Advance Credit:           ${currSymbol} ${payment.extraAmount?.toLocaleString()}\n` : ''}--------------------------------------------------
+Notes / Memo: ${payment.notes || 'None'}
+
+Thank you for training with ${gymName || 'GYM STATION'}!
+==================================================`;
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Receipt_${memberName.replace(/[^a-zA-Z0-9]/g, '_')}_${txnId}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -167,49 +216,60 @@ export default function PaymentsList({
       </div>
 
       {/* Financial Bento Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5" id="payments-stats-grid">
-        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="card-gross">
-          <div className="flex justify-between items-center text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span>Gross Revenue</span>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4" id="payments-stats-grid">
+        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-4 shadow-sm" id="card-gross">
+          <div className="flex justify-between items-center text-slate-400 text-[11px] font-semibold uppercase tracking-wider">
+            <span>Collected Fees</span>
             <DollarSign className="w-4 h-4 text-lime-400" />
           </div>
-          <h3 className="text-3xl font-bold text-white font-display mt-3">Rs. {totalRevenue}</h3>
-          <p className="text-slate-500 text-xs mt-2 font-sans flex items-center gap-1">
-            <TrendingUp className="w-3.5 h-3.5 text-lime-400" />
-            <span className="text-slate-400 font-medium">{dateFilteredPayments.length} payments in selected filter</span>
+          <h3 className="text-2xl font-bold text-white font-display mt-2">{currSymbol} {totalRevenue.toLocaleString()}</h3>
+          <p className="text-slate-500 text-[11px] mt-1.5 font-sans flex items-center gap-1">
+            <TrendingUp className="w-3 h-3 text-lime-400" />
+            <span className="text-slate-400 font-medium">{dateFilteredPayments.length} receipts</span>
           </p>
         </div>
 
-        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="card-ticket">
-          <div className="flex justify-between items-center text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span>Average Receipt</span>
-            <ArrowDownLeft className="w-4 h-4 text-blue-400" />
+        <div className="bg-[#161B22] border border-amber-500/20 rounded-3xl p-4 shadow-sm bg-amber-500/5" id="card-dues">
+          <div className="flex justify-between items-center text-amber-400 text-[11px] font-semibold uppercase tracking-wider">
+            <span>Recorded Dues</span>
+            <Tag className="w-4 h-4 text-amber-400" />
           </div>
-          <h3 className="text-3xl font-bold text-white font-display mt-3">Rs. {averageTicket}</h3>
-          <p className="text-slate-500 text-xs mt-2 font-sans">
-            Across {dateFilteredPayments.length} transactions
+          <h3 className="text-2xl font-bold text-amber-300 font-display mt-2">{currSymbol} {totalRecordedDues.toLocaleString()}</h3>
+          <p className="text-slate-400 text-[11px] mt-1.5 font-sans">
+            Remaining unpaid balances
           </p>
         </div>
 
-        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="card-cash">
-          <div className="flex justify-between items-center text-slate-400 text-xs font-semibold uppercase tracking-wider">
+        <div className="bg-[#161B22] border border-emerald-500/20 rounded-3xl p-4 shadow-sm bg-emerald-500/5" id="card-advance">
+          <div className="flex justify-between items-center text-emerald-400 text-[11px] font-semibold uppercase tracking-wider">
+            <span>Advance Credit</span>
+            <CheckCircle className="w-4 h-4 text-emerald-400" />
+          </div>
+          <h3 className="text-2xl font-bold text-emerald-300 font-display mt-2">{currSymbol} {totalRecordedAdvance.toLocaleString()}</h3>
+          <p className="text-slate-400 text-[11px] mt-1.5 font-sans">
+            Extra prepayments recorded
+          </p>
+        </div>
+
+        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-4 shadow-sm" id="card-cash">
+          <div className="flex justify-between items-center text-slate-400 text-[11px] font-semibold uppercase tracking-wider">
             <span>Cash Box</span>
-            <span className="text-emerald-400 font-mono text-[10px] font-bold">PHYSICAL</span>
+            <span className="text-emerald-400 font-mono text-[9px] font-bold">CASH</span>
           </div>
-          <h3 className="text-3xl font-bold text-white font-display mt-3">Rs. {cashTotal}</h3>
-          <p className="text-slate-500 text-xs mt-2 font-sans">
+          <h3 className="text-2xl font-bold text-white font-display mt-2">{currSymbol} {cashTotal.toLocaleString()}</h3>
+          <p className="text-slate-500 text-[11px] mt-1.5 font-sans">
             {Math.round((cashTotal / (totalRevenue || 1)) * 100)}% of total receipts
           </p>
         </div>
 
-        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-5 shadow-sm" id="card-digital">
-          <div className="flex justify-between items-center text-slate-400 text-xs font-semibold uppercase tracking-wider">
-            <span>Digital / Card</span>
+        <div className="bg-[#161B22] border border-slate-800 rounded-3xl p-4 shadow-sm" id="card-digital">
+          <div className="flex justify-between items-center text-slate-400 text-[11px] font-semibold uppercase tracking-wider">
+            <span>Digital / POS</span>
             <CreditCard className="w-4 h-4 text-purple-400" />
           </div>
-          <h3 className="text-3xl font-bold text-white font-display mt-3">Rs. {cardTotal + bankTotal}</h3>
-          <p className="text-slate-500 text-xs mt-2 font-sans">
-            Bank transfer & POS terminals combined
+          <h3 className="text-2xl font-bold text-white font-display mt-2">{currSymbol} {(cardTotal + bankTotal).toLocaleString()}</h3>
+          <p className="text-slate-500 text-[11px] mt-1.5 font-sans">
+            Bank transfer & POS combined
           </p>
         </div>
       </div>
@@ -260,7 +320,8 @@ export default function PaymentsList({
                 <th className="py-3 px-4">Locked Plan</th>
                 <th className="py-3 px-4">Paid On</th>
                 <th className="py-3 px-4">Channel</th>
-                <th className="py-3 px-4">Gross Amt</th>
+                <th className="py-3 px-4">Paid Amount</th>
+                <th className="py-3 px-4">Balance Recorded</th>
                 <th className="py-3 px-5 text-right">Invoice</th>
               </tr>
             </thead>
@@ -298,16 +359,45 @@ export default function PaymentsList({
                       )}
                     </td>
                     <td className="py-3.5 px-4 font-mono font-bold text-white text-sm">
-                      Rs. {p.amount}
+                      {currSymbol} {p.amount.toLocaleString()}
+                    </td>
+                    <td className="py-3.5 px-4">
+                      {(p.dueAmount || 0) > 0 ? (
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold font-mono text-[11px] inline-flex items-center gap-1">
+                          <span>⚠️ Due:</span>
+                          <span>{currSymbol} {p.dueAmount?.toLocaleString()}</span>
+                        </span>
+                      ) : (p.extraAmount || 0) > 0 ? (
+                        <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-bold font-mono text-[11px] inline-flex items-center gap-1">
+                          <span>✨ Advance:</span>
+                          <span>{currSymbol} {p.extraAmount?.toLocaleString()}</span>
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px]">
+                          Settled
+                        </span>
+                      )}
                     </td>
                     <td className="py-3.5 px-5 text-right">
-                      <button
-                        onClick={() => setSelectedReceipt(p)}
-                        className="text-lime-400 hover:text-lime-500 hover:underline font-bold flex items-center justify-end gap-1 ml-auto cursor-pointer"
-                        id={`invoice-btn-${p.id}`}
-                      >
-                        <FileText className="w-3.5 h-3.5" /> Receipt
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => setSelectedReceipt(p)}
+                          className="text-lime-400 hover:text-lime-300 font-bold flex items-center gap-1 cursor-pointer bg-lime-400/10 hover:bg-lime-400/20 border border-lime-400/20 px-2 py-1 rounded-lg text-xs transition-colors"
+                          id={`invoice-btn-${p.id}`}
+                          title="View Official Receipt"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>Receipt</span>
+                        </button>
+                        <button
+                          onClick={() => handleDownloadReceipt(p)}
+                          className="text-emerald-300 hover:text-white font-bold flex items-center gap-1 cursor-pointer bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/30 px-2 py-1 rounded-lg text-xs transition-colors"
+                          id={`download-btn-${p.id}`}
+                          title="Download Receipt Document (.txt)"
+                        >
+                          <Download className="w-3.5 h-3.5 text-emerald-400" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -377,13 +467,29 @@ export default function PaymentsList({
                   </div>
                   <div className="flex justify-between text-slate-300 mt-1.5" id="r-item-row">
                     <span>{plan ? plan.name : 'Gym Membership'}</span>
-                    <span>Rs. {selectedReceipt.amount}</span>
+                    <span>{currSymbol} {(selectedReceipt.planPrice || plan?.price || selectedReceipt.amount).toLocaleString()}</span>
                   </div>
                 </div>
 
-                <div className="border-t border-slate-800 pt-3 flex justify-between items-baseline" id="r-total">
-                  <span className="text-slate-400 font-bold uppercase text-[10px]">Grand Total:</span>
-                  <span className="text-xl font-extrabold text-lime-400 font-display">Rs. {selectedReceipt.amount}</span>
+                <div className="border-t border-slate-800 pt-3 space-y-1" id="r-total">
+                  <div className="flex justify-between items-baseline">
+                    <span className="text-slate-400 font-bold uppercase text-[10px]">Amount Paid:</span>
+                    <span className="text-xl font-extrabold text-lime-400 font-display">{currSymbol} {selectedReceipt.amount.toLocaleString()}</span>
+                  </div>
+
+                  {(selectedReceipt.dueAmount || 0) > 0 && (
+                    <div className="flex justify-between items-center text-amber-300 text-[11px] font-bold bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded-lg mt-2">
+                      <span>⚠️ Unpaid Due Recorded:</span>
+                      <span>{currSymbol} {selectedReceipt.dueAmount?.toLocaleString()}</span>
+                    </div>
+                  )}
+
+                  {(selectedReceipt.extraAmount || 0) > 0 && (
+                    <div className="flex justify-between items-center text-emerald-300 text-[11px] font-bold bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded-lg mt-2">
+                      <span>✨ Extra Advance Credit:</span>
+                      <span>{currSymbol} {selectedReceipt.extraAmount?.toLocaleString()}</span>
+                    </div>
+                  )}
                 </div>
 
                 {selectedReceipt.notes && (
@@ -394,20 +500,29 @@ export default function PaymentsList({
               </div>
 
               {/* Action Buttons */}
-              <div className="pt-4 border-t border-slate-800 flex gap-2" id="receipt-actions">
+              <div className="pt-4 border-t border-slate-800 flex flex-wrap sm:flex-nowrap gap-2" id="receipt-actions">
                 <button
                   onClick={() => setSelectedReceipt(null)}
-                  className="flex-1 bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 text-xs font-semibold py-2.5 rounded-xl transition-all text-center cursor-pointer"
+                  className="bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 text-xs font-semibold py-2.5 px-3 rounded-xl transition-all text-center cursor-pointer"
                   id="close-receipt-btn"
                 >
                   Dismiss
                 </button>
                 <button
+                  onClick={() => handleDownloadReceipt(selectedReceipt)}
+                  className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-black text-xs font-bold py-2.5 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-emerald-500/10"
+                  id="download-modal-receipt-btn"
+                >
+                  <Download className="w-3.5 h-3.5 text-black" />
+                  <span>Download</span>
+                </button>
+                <button
                   onClick={handlePrintReceipt}
-                  className="flex-1 bg-lime-400 hover:bg-lime-500 text-black text-xs font-bold py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-lime-400/5"
+                  className="flex-1 bg-lime-400 hover:bg-lime-500 text-black text-xs font-bold py-2.5 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-lime-400/5"
                   id="print-receipt-btn"
                 >
-                  <Printer className="w-3.5 h-3.5" /> Print Tax
+                  <Printer className="w-3.5 h-3.5 text-black" />
+                  <span>Print Tax</span>
                 </button>
               </div>
             </div>
